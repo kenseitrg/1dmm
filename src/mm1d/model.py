@@ -360,6 +360,19 @@ class LayeredModel:
         z = self.impedance
         return (z[1:] - z[:-1]) / (z[1:] + z[:-1])
 
+    @property
+    def transmissions_normal(self) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Normal-incidence pressure transmission ``(T_down, T_up)`` per interface.
+
+        ``T_down = 2 Z_below / (Z_above + Z_below)`` for a down-going wave and
+        ``T_up = 2 Z_above / (Z_above + Z_below)`` for the upward analog, so the
+        round-trip product satisfies ``T_down * T_up = 1 - R**2`` for every
+        interface.
+        """
+        z = self.impedance
+        total = z[1:] + z[:-1]
+        return 2.0 * z[1:] / total, 2.0 * z[:-1] / total
+
     def _check_interface(self, i: int) -> None:
         """Raise ModelError unless ``i`` is a valid interface index."""
         if not 0 <= i < self.n_interfaces:

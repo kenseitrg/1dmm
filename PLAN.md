@@ -35,8 +35,9 @@ Reference source: 20 Hz Ricker (dominant period 50 ms; wavelet length ≈ 150 ms
 
 R₁ = (3000·2500 − 2000·2000)/(3000·2500 + 2000·2000) ≈ 0.304.
 Full wavefield (free-surface reflection **R_s = −1**, pressure-release — see
-AGENTS.md sign conventions): arrivals at tₙ = (n+1)·1.0 s with amplitudes
-R₁·(R_s·R₁)ⁿ = R₁·(−R₁)ⁿ — alternating polarity: +0.304, −0.093, +0.028, −0.009
+AGENTS.md sign conventions): arrivals at tₙ = (n+1)·2h/v = (n+1)·0.5 s with
+amplitudes R₁·(R_s·R₁)ⁿ = R₁·(−R₁)ⁿ — alternating polarity: +0.304, −0.093,
++0.028, −0.009
 (verified against the exact packet recursion at planning time). No transmission
 losses (path never crosses the interface).
 `primaries` variant: single event, amplitude R₁. `no_surface`: identical to
@@ -113,7 +114,7 @@ uv run ty check && uv run pytest` all green; `uv.lock` committed.
 **Done when**: unit tests for loaders/errors pass; R/T coefficients match
 hand-computed values for T1–T3 interfaces; `R²+T²=1` for all θ in grid.
 
-### M2 — Zero-offset synthetics, three variants (`wavelet.py`, `reflectivity.py` normal-incidence path)
+### M2 — Zero-offset synthetics, three variants (`wavelet.py`, `reflectivity.py` normal-incidence path) ✅ (complete 2026-11-06)
 **Goal**: `1dmm_ud.ipynb` logic, productized.
 - Ricker wavelet (time + frequency domain, consistent normalization).
 - Normal-incidence recursion for the three variants (switch semantics per
@@ -123,8 +124,9 @@ hand-computed values for T1–T3 interfaces; `R²+T²=1` for all θ in grid.
 - Script `scripts/zero_offset.py`: three stacked traces for T2 and T3 →
   `output/zero_offset_{model}_{variant}.png`.
 **Done when**:
-- T1: `full` peaks at (n+1)·1.0 s match R₁·(R_s·R₁)ⁿ within 1e-6 (impulse
-  response, no wavelet); `primaries` single arrival R₁.
+- T1: `full` peaks at (n+1)·2h/v = (n+1)·0.5 s match R₁·(R_s·R₁)ⁿ within 1e-6
+  (impulse response, no wavelet; times corrected from the original “1.0 s”
+  anchor — see changelog); `primaries` single arrival R₁.
 - T2: water-bottom multiple amplitudes follow the analytic series including
   transmission terms; `full − no_surface` and `no_surface − primaries` vanish
   above 0.35 s (before first return).
@@ -214,6 +216,36 @@ figure set; all quality gates green.
 
 ## Changelog
 
+- 2026-11-06: **M2 complete** — `wavelet.py` (unit-peak Ricker time wavelet +
+  analytic spectrum `W(f) = 2 f²/(√π f_dom³)·exp(−(f/f_dom)²)` with
+  `rfft(w) = W/dt` consistency, tested against a fine FFT of the sampled
+  wavelet), `reflectivity.py` normal-incidence path (`stack_response_normal`
+  compound recursion per frequency: `G_i = R_i + Td_i·Tu_i·X/(1 + R_i·X)`,
+  `X = G_{i+1}·e^{−2iωτ}`; surface series `U₀/(1 − R_s·U₀)` with
+  `FREE_SURFACE_REFLECTIVITY = −1`; `variant_multiples` switch table shared by
+  the M3 engine-to-be; `impulse_response`/`zero_offset_trace` with an `n_fft`
+  extension parameter), `viz.py` M2 helpers, `scripts/zero_offset.py` →
+  `output/zero_offset_{model}_{variant}.png` plus a `{model}_stack.png`
+  comparison per model. Deviations/design decisions: (a) **T1 anchor times
+  corrected** — the original acceptance said arrivals at (n+1)·1.0 s, but with
+  h = 500 m, vp = 2000 m/s the round trip is 2h/v = 0.5 s; data, the PLAN table
+  (TWT 0.5 s) and AGENTS (“period 2h/v”) were already consistent, the 1.0 s was
+  a planning slip. (b) **Pure water-bottom train times end at 2.0 s**: from
+  2.4 s on (`0.4·6 = 0.4·1 + 0.5·4`) sediment-reverberation events coincide
+  with the train, so the simple series `R₁(−R₁)ⁿ` no longer holds there.
+  (c) **FFT wraparound needs long records**: the impulse response tail beyond
+  the FFT record folds back (a dense 0.1 s event comb of peg-leg/interbed
+  events persists past the visible window; measured fold-back: ~2e-5 at
+  T=12 s → 6e-16 at T=48 s for T2), so `impulse_response`/`zero_offset_trace`
+  take `n_fft`; the 1e-6-level anchor tests use T_fft = 8–32 s and figures use
+  8× the display window. (d) Synthetic spectrum normalization is
+  `S·W/dt` (not `W·dt`): pinned by the frequency-vs-time-convolution test.
+  (e) `LayeredModel.transmissions_normal` added (pressure T pair,
+  `Td·Tu = 1 − R²`, single-sourced for the recursion). All gates green
+  (ruff, ty, 82 tests incl. new test_wavelet/test_zero_offset). Figures
+  verified via glm-5.3-flash delegation: T2 stack (2 primaries, alternating
+  train in `full` only, no pre-0.35 s energy) and T3 stack (4 primaries,
+  0.5 s surface train `full`-only, interbed energy `no_surface`-only).
 - 2026-11-06: **M1 complete** — `units.py` (single degree/radian + s/ms conversion
   point), `model.py` (`LayeredModel` dataclass; normal-incidence and p-dependent
   acoustic R/T; flux-normalized `T_hat` with `|R|^2+|T_hat|^2 = 1`; complex-safe
