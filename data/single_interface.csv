@@ -1,0 +1,6 @@
+# T1 "single interface" canonical model (PLAN.md): one layer over a half-space.
+# Blocked-log format: depth_m is the TOP of each layer; the last row is the
+# half-space. R1 = 0.3043, layer TWT = 0.5 s.
+depth_m,vp_m_s,rho_kg_m3
+0,2000,2000
+500,3000,2500

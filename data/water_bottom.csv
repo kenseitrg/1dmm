@@ -1,0 +1,7 @@
+# T2 "water bottom" canonical model (PLAN.md): water layer over sediment over
+# half-space. Strong water-bottom reflector (R1 = 0.5412) drives the surface
+# multiple train. Layer TWTs 0.4 s / 0.5 s; primaries at 0.4 s and 0.9 s.
+depth_m,vp_m_s,rho_kg_m3
+0,1500,1000
+300,2400,2100
+900,3000,2300

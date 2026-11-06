@@ -11,6 +11,9 @@ Pipeline (one stage per module group): ``logs → model → reflectivity →
 synthetics → gathers → semblance → events/viz``.
 """
 
+from mm1d.model import LayeredModel
+from mm1d.reflectivity import ALL_VARIANTS, WavefieldVariant
+
 __version__ = "0.1.0"
 
-__all__ = ["__version__"]
+__all__ = ["ALL_VARIANTS", "LayeredModel", "WavefieldVariant", "__version__"]

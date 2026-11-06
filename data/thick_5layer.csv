@@ -1,0 +1,9 @@
+# T3 "thick 5-layer" canonical model (PLAN.md): four finite layers over a
+# half-space; layer 3 (soft interbed) generates interbed multiples.
+# Layer TWTs 0.5/0.5/0.3/0.5 s; primaries at 0.5/1.0/1.3/1.8 s.
+depth_m,vp_m_s,rho_kg_m3
+0,1800,2000
+450,2700,2300
+1125,2300,2150
+1470,3000,2300
+2220,3600,2500

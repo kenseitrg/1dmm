@@ -100,7 +100,7 @@ only — tests must compute them from the model, not hard-code these numbers.)
 **Done when**: `uv sync && uv run ruff check . && uv run ruff format --check . &&
 uv run ty check && uv run pytest` all green; `uv.lock` committed.
 
-### M1 — Model building (`io.py`, `model.py`, `units.py`)
+### M1 — Model building (`io.py`, `model.py`, `units.py`) ✅ (complete 2026-11-06)
 **Goal**: logs → validated layered model → reflection coefficients.
 - CSV/TXT loaders (single 3-column file; or two 2-column files merged on depth
   with tolerance); validation: monotonic depth, positive v/ρ, NaN handling with
@@ -214,6 +214,25 @@ figure set; all quality gates green.
 
 ## Changelog
 
+- 2026-11-06: **M1 complete** — `units.py` (single degree/radian + s/ms conversion
+  point), `model.py` (`LayeredModel` dataclass; normal-incidence and p-dependent
+  acoustic R/T; flux-normalized `T_hat` with `|R|^2+|T_hat|^2 = 1`; complex-safe
+  post-critical behaviour `|R| = 1, T_hat = 0`; critical angles), `io.py`
+  (3-column loader; two 2-column files merged on depth with tolerance;
+  blocked-model loader; uniform-TWT blocking with exact slowness integration,
+  harmonic-mean layer velocities, exact piecewise-linear density averaging).
+  Canonical models T1–T3 in `data/`. Deviations/design decisions: (a) canonical
+  `data/*.csv` are *blocked* logs — `depth_m` is the layer top, last row =
+  half-space, read by `load_blocked_model` — so layer boundaries stay exact
+  (a sampled-log read would smear them); (b) energy-normalized transmission is
+  flux-based (vertical energy flux), hence exactly 0 in the evanescent region;
+  tests cover the full 0–40° grid including past the T2 water-bottom critical
+  angle (38.68°); (c) blocking covers the whole logged interval with uniform-TWT
+  cells (deepest cell absorbs the remainder, so no layer is thinner than the
+  target TWT) and appends a half-space duplicating the deepest cell — base
+  interface R = 0 exactly, total TWT/mass preserved. All gates green (ruff,
+  ty, 50 tests). Demo: ``scripts/model_demo.py`` (verified via glm-5.3-flash
+  delegation) produces ``output/model_demo_{models,rtheta,blocking}.png``.
 - 2026-11-06: **M0 complete** — uv-managed scaffold (Python 3.14.9, src/mm1d
   layout, hatchling build), ruff (lint+format, notebooks excluded so the
   prototype `1dmm_ud.ipynb` stays untouched), ty, pytest configured; stub modules
