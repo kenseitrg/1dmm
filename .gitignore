@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Tooling caches
+.venv/
+.ruff_cache/
+.pytest_cache/
+.ty/
+.pi/
+
+# Generated figures
+output/
+
+# Reference material (root PDFs): local-only, kept on disk but not tracked
+/*.pdf
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
