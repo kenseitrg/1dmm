@@ -132,7 +132,7 @@ hand-computed values for T1–T3 interfaces; `R²+T²=1` for all θ in grid.
   above 0.35 s (before first return).
 - Figure check (M2 figure): events countable by eye, variants visibly differ.
 
-### M3 — ω–p reflectivity engine → angle gathers (`reflectivity.py` full)
+### M3 — ω–p reflectivity engine → angle gathers (`reflectivity.py` full) ✅ (complete 2026-11-08)
 **Goal**: Müller recursion per (ω, p); angle-domain gathers for three variants.
 - Recursive reflectivity/transmissivity of the stack (compound-matrix style,
   stable for all subcritical p); evanescent cutoff; free-surface receiver term.
@@ -216,6 +216,53 @@ figure set; all quality gates green.
 
 ## Changelog
 
+- 2026-11-08: **M3 complete** — `reflectivity.stack_response`: the full ω–p
+  plane-wave engine (same compound recursion and variant switches as M2,
+  generalized to horizontal slowness): p-dependent interface coefficients via
+  `_stack_terms`, layer round-trip *intercept* delays `2 q_i h_i`
+  (`q_i = sqrt(1/v_i² − p²)`), free surface exactly −1 at every p.  Events in
+  the angle gathers land on intercept times `τ(p) = Σ q_j h_j per leg`
+  (decreasing with angle; `dτ/dp = −x` feeds M4).  `gathers.py`:
+  `slowness_from_angle`, `angle_impulse_gather`, `angle_gather` (Ricker
+  synthetic), `critical_mute_slowness`, `primary_intercept_times` (NaN where
+  a leg is evanescent).  `viz.py`: `plot_angle_gather` (variable-density +
+  dashed primary-intercept overlay + mute boundary) and
+  `angle_gather_stack_figure`.  `scripts/angle_gathers.py` →
+  `output/angle_gather_{model}_{variant}.png` + `_stack.png` for T1–T3.
+  Deviations/design decisions: (a) **Engine convention is the conjugate of
+  the `e^{−iωt}` physics**: traces are synthesized with `irfft` (delay =
+  `e^{−iωt₀}`), which reproduces the physical solution only if coefficients
+  are `conj` of model.py's standard ones — identical subcritical, conjugated
+  post-critical (pinned by the T2 closed-form test at θ > 30°); the evanescent
+  cosine branch `Im(c) < 0` then makes propagators decay `e^{−ω|q|h}`
+  (stable tunnelling) instead of overflowing.  (b) **"Evanescent cutoff
+  p > 1/v_max zeroed" implemented as a gather-level mute at
+  `p = 1/max(vp[1:])` = smallest interface-critical slowness**: beyond it the
+  stack is a lossless total reflector (`|U₀| = 1` exactly for `no_surface`) and
+  the `full` free-surface series resonates (plane-wave cavity; measured
+  `min|1+U₀| ≈ 5e-4` → `|S| ≈ 2e3` at 40°) — for T2/T3 the mute lands at 30°,
+  for T1 at 41.8° (outside the 0–40° grid).  The engine itself stays exact,
+  finite and warning-free across the whole grid (errstate test), including
+  post-critical interface coefficients and tunnelling through evanescent
+  fast layers.  (c) **Amplitudes are plane-wave pressures**: no geometric
+  spreading, no obliquity factor — stated on every angle-gather figure
+  (M3 risk item resolved).  (d) Closed-form anchors avoid angles exactly at
+  criticality (e.g. θ = 30° for T2): there `R'(p) → ∞` amplifies ulp-level
+  slowness noise to ~1e-8, so 29° is used instead.  Anchors tested (65 new
+  tests, 147 total): `stack_response(p=0) == stack_response_normal` (≤1e-12,
+  all models/variants); T1 exact closed forms at angle (`primaries`
+  `R(p)e^{−2iωτ}`, `full` series `x/(1+x)`, machine precision); T2 exact
+  two-interface closed forms (Snell-refracted times, coefficient products,
+  incl. the conjugated post-critical branch); `full = no_surface/(1+` `no_surface)`;
+  `|no_surface| ≤ 1` (lossless energy bound, = 1 past critical); Hermitian
+  response; θ=0 gather column == M2 trace (≤2e-14); T1 envelope picks
+  (time `0.5·cosθ`, amplitude `R₁(θ)`); intercept-time values and NaN cutoffs;
+  input validation.  Figures verified via glm-5.3-flash delegation: T1 stack
+  (primary 0.5 s + 1.0 s surface multiple full-only, moveup toward earlier
+  times, no pre-event energy), T2 stack (primaries 0.4/0.9 s, 0.4 s-period
+  water-bottom train full-only, AVO build-up to the 30° mute), T3 stack
+  (primaries 0.5/1.0/1.3/1.8 s, surface train full-only, interbed energy
+  no_surface-only, P4 curve correctly ending at 36.9°).
 - 2026-11-06: **M2 complete** — `wavelet.py` (unit-peak Ricker time wavelet +
   analytic spectrum `W(f) = 2 f²/(√π f_dom³)·exp(−(f/f_dom)²)` with
   `rfft(w) = W/dt` consistency, tested against a fine FFT of the sampled
