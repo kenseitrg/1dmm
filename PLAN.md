@@ -146,17 +146,25 @@ hand-computed values for T1–T3 interfaces; `R²+T²=1` for all θ in grid.
   (x(θ), T(θ) closed forms); amplitude trend vs θ matches acoustic R(θ).
 - Recursion stable across full p grid (no overflow warnings at critical p).
 
-### M4 — Angle → offset conversion (`gathers.py`)
+### M4 — Angle → offset conversion (`gathers.py`) ✅ (complete 2026-11-09)
 **Goal**: offset gathers via Snell-law ray tracing.
 - Per-layer ray parameter: p = sinθ_i/v_i constant; x = Σ hᵢ tanθᵢ, T = Σ
   hᵢ/(vᵢ cosθᵢ) over the event's legs; event-agnostic gather transform
-  (map θ→x per trace, resample amplitude to uniform offset grid).
+  (map θ→x per trace, resample amplitude to uniform offset grid)
+  — implemented as the exact-inverse ρ-filtered slant stack plus the
+  ray-tracing layer; see changelog 2026-11-09 for the design decision.
 - Script `scripts/offset_gathers.py` → `output/offset_gather_{model}_{variant}.png`.
 **Done when**:
 - Zero-offset trace preserved at x = 0; offset of T1 primary vs θ matches
   closed-form 2h·tanθ; round-trip angle↔offset consistent within interpolation
   error; near/far offsets of the T2 water-bottom multiple follow the theoretical
-  moveout (flatter than primary — the classic pitfall this project exploits).
+  moveout `T(x) = sqrt(T0^2 + x^2/v_w^2)` — V_stk pinned at the water velocity,
+  i.e. **lower** apparent velocity (steeper moveout) than a primary at the same
+  T0 would have (V_rms(0.8 s) ≈ 2001 m/s): the moveout separability behind
+  radon demultiple. "Flatter than primary" (higher V_stk at equal T0) is an
+  *interbed* phenomenon requiring a fast reverberating layer over a slower
+  deeper section — not producible by T1–T3 (expectation corrected 2026-11-09,
+  see changelog).
 
 ### M5 — Semblance (`semblance.py`)
 **Goal**: Neidell–Taner semblance panels per variant.
@@ -165,8 +173,13 @@ hand-computed values for T1–T3 interfaces; `R²+T²=1` for all θ in grid.
 - Script `scripts/semblance.py` → `output/semblance_{model}_{variant}.png`.
 **Done when**: on T2 `primaries` panel, maxima at (0.4 s, V_rms₁) and
 (0.9 s, V_rms₂) within one grid cell of Dix values; on `full` panel the
-water-bottom multiple ridge appears at *higher* apparent velocity than a primary
-at the same T₀ would (moveout of 2·t_water-bounce legs).
+water-bottom multiple train forms a ridge pinned at the water velocity
+(V_stk = v_w at every order) — below the same-T₀ primary Dix trend, the
+free-surface-multiple signature — while interbed/peg-leg ridges sit between
+that trend and the pinned surface-multiple ridges. Higher-than-primary
+apparent velocities belong to fast-layer interbed generators (none in
+T1–T3; candidate T4 model for M6) — expectation corrected 2026-11-09,
+see changelog.
 
 ### M6 — Event catalog & theoretical velocities (`events.py`, `viz.py` overlays)
 **Goal**: the multiple-identification payoff.
@@ -216,6 +229,108 @@ figure set; all quality gates green.
 
 ## Changelog
 
+- 2026-11-09: **M4.1 — offset-gather artifact control** (user request:
+  "do not like wrap-around artifacts").  Diagnosis first: literal FFT
+  wrap-around was never the visible issue (8x record extension measured
+  < 3e-5 of peak); the visible artifacts were (a) acausal radiation of the
+  hard slowness-aperture truncation — worst just below the post-critical
+  mute where |U| grows toward resonance (~3 % of peak, near-mid offsets) —
+  and (b) far-offset quadrature aliasing of the 1 deg p-grid (~3-5 %).  A
+  causal one-sided (Sommerfeld/Weyl) kernel was prototyped and REJECTED:
+  it removes the acausal smear but leaves ±10-20 % event-amplitude ripple
+  (the uncancelled p = 0 endpoint term interferes with every event) — the
+  mirrored cos kernel stays (amplitude continuity, exact-pair structure).
+  Shipped: `DEFAULT_APERTURE_TAPER = 0.15` Tukey (cos²) taper over the end
+  of the (mute-clipped) aperture — parameter `taper_fraction` on
+  `offset_gather`/`offset_impulse_gather` — plus internal anti-aliasing
+  refinement of the synthesis p-grid to `delta_p <= 1/(4 f_max x_max)`
+  (`_refine_factor`/`_refine_angles`, cap 16x; f_max = 3·f_dom for Ricker
+  gathers, Nyquist for impulse).  Result (T2 full, measured): acausal
+  pre-event energy 3.3 % → 1.2 % of peak, far-offset pre-event 3.2 % →
+  1.2 %, stationary-phase anchors unchanged for θ ≤ 15° (≤ 0.4 %; the
+  20° anchor sits in the taper-skirt interference band, ≤ 10 %), event
+  times everywhere exact, round trip unchanged (corr ≈ 0.96, scale ≈
+  0.88-0.95).  The residual near-offset pre-event ramp (a few % of peak,
+  deepest events worst) is the events' own non-stationary aperture content —
+  the finite-aperture price of amplitude-preserving synthesis; removing it
+  entirely would require catalog-driven deposition (rejected at M4 for
+  M5/M6 circularity).  Tests: grid-equivalence mute test replaced (the
+  near-mute resonant sliver made it meaningless — 0-40° vs 0-29° differ by
+  ~5-8 % through different quadratures of a near-singular integrand) by
+  exact weights-level mute exclusion + behavioral causality/taper tests +
+  refinement-convergence test + helper unit tests (35 offset tests, 182
+  total).  Figures regenerated; glm-5.3-flash verification: pre-event zone
+  visually clean on T2 (`blank white above P1`) and T3 (four primaries on
+  their dashed curves; faint near-offset smudge = documented ramp).
+- 2026-11-09: **M4 complete** — `gathers.py` grew two layers. **Snell ray
+  tracing**: `layer_angles` (refraction per layer, NaN evanescent),
+  `path_offset_time` (arbitrary bounce paths as turning-point sequences over
+  `{SURFACE = −1, 0..n_interfaces−1}`; legs crossed → `x += h tanθ`,
+  `T += h/(v cosθ)`; reused by M6), `primary_offset_times`, and
+  `default_offset_grid` (uniform grid to the deepest primary's offset at the
+  last unmuted angle). **Offset-gather synthesis**:
+  `offset_impulse_gather`/`offset_gather` — the event-agnostic
+  ρ-filtered inverse slant stack evaluated in the frequency domain on the
+  *mirrored* slowness grid, `D(x,ω) = (|ω|/π)Σ_j w_j U_j cos(ω p_j x)`
+  (exact because the engine depends on p² only; pinned by a
+  `_stack_terms`-evenness test); trapezoid weights are *clipped* at the
+  critical mute (0–40° synthesis is then bit-identical to the 0–29° one);
+  `slant_stack` is the one-sided forward τ-p transform for validation.
+  `viz.plot_offset_gather`/`offset_gather_stack_figure`;
+  `scripts/offset_gathers.py` → `output/offset_gather_{model}_{variant}.png`
+  + `_stack.png` for T1–T3 with primary/multiple moveout overlays.
+  Deviations/design decisions: (a) **"map θ→x per trace" was not
+  implementable as written** — offset is event-dependent (`τ'(p) = −x(p)`:
+  at one θ the T2 water-bottom multiple and P2 go to different offsets), so
+  the event-agnostic transform is the exact-inverse synthesis; every event
+  of the engine (any multiple family) lands on its own `(x(p*), T(p*))`
+  with no catalog, keeping M5/M6 semblance-vs-catalog non-circular (user
+  decision: "both transforms" — ray tracing for overlays/tests/M6,
+  slant stack for the gathers). (b) **Amplitude convention**: 2-D
+  line-source plane-wave synthesis — the |ω| ρ-filter reshapes the wavelet
+  by √ω and event peaks scale as `A(p*)/√(2π|dx/dp|)`, continuous through
+  x = 0; anchored to 3 % on T1 for θ ≤ 20° (a first attempt doubling only
+  the `e^{−iωpx}` branch gave a spurious factor-2 jump at x = 0; the
+  mirrored cos kernel fixed it). Stationary rays within ~a Fresnel zone of
+  the aperture edge or mute ring up +10–20 % then fade (edge diffraction;
+  times stay exact; vanishes with a wider aperture grid). (c) **Round trip
+  has no exact identity on one-sided finite apertures** (the mirrored −p
+  background of the exact bi-infinite pair cannot cancel; a pure-ω test
+  pinned this): the one-sided forward recovers the input *eventwise* —
+  times exact, corr ≈ 0.96, scale ≈ 0.90–0.96 — documented as finite-
+  aperture corrections rather than "interpolation error". (d) **Zero-offset
+  trace preserved at x = 0 at the event level**: times within a sample,
+  variant/train structure intact; amplitudes legitimately differ from M2 by
+  the per-event focusing factor (e.g. T3-full's 1.8 s window pick shifts
+  under neighbour interference; the primaries-variant picks are exact).
+  (e) Independent forward anchor: a hand-built constant-V hyperbola gather
+  transforms to `τ(p) = T₀√(1−p²V²)` picks. Anchors tested (32 new tests,
+  179 total): T1 `2h·tanθ` closed form + hyperbola picks (θ = 0–40°) +
+  stationary-phase amplitudes; T2 Snell refraction, 4-leg water-bottom
+  multiple, multiple-vs-primary hyperbola separation (−12 ms @ 322 m,
+  −35 ms @ 560 m — the corrected steeper-than-primary expectation);
+  zero-offset events all models/variants; round trip; mute equivalence;
+  validation errors. Also fixed an arithmetic slip in the corrected
+  expectation text: V_rms(0.8 s) = 2001 m/s (was quoted 1790). All gates
+  green (ruff, ty, pytest). Figures verified via glm-5.3-flash delegation:
+  T1 (P1 + alternating train in `full` only, hyperbola 0.5→0.65 s,
+  overlay on crest, no pre-0.4 s energy), T2 (P1/P2/M_wb1/M_wb2/peg12 all
+  on their curves; M_wb1 curves down *much* faster than P2, P2 far-offset
+  time 1.2–1.25 s vs theory 1.244 s), T3 (four primaries clean; M_s1 on
+  the 1.0 s train; interbed23 below display clip by amplitude design,
+  ~1 % of P1).
+- 2026-11-09: **multiple-velocity expectation corrected (M4/M5 acceptance text)** —
+  free-surface multiples repeat their generating primary's path, so their
+  V_stk equals the RMS velocity of that (shallow) path and never exceeds the
+  same-T₀ primary trend in a normally graded section (T2 water-bottom
+  multiple: V_stk = v_w = 1500 m/s exactly vs V_rms(0.8 s) ≈ 2001 m/s →
+  *steeper*; the radon-separability signature, a ridge pinned at the water
+  velocity on semblance panels). The "flatter than primary / higher apparent
+  velocity" phenomenon is an interbed effect requiring a reverberating layer
+  faster than the deeper section (v_layer² > marginal RMS² of going deeper);
+  none of T1–T3 has such geometry (T3's interbed generator is the soft layer,
+  2300 over 3000 m/s) — a fast-layer-over-slow T4 is a candidate addition
+  for M6 if that regime should be demonstrated.
 - 2026-11-08: **M3 complete** — `reflectivity.stack_response`: the full ω–p
   plane-wave engine (same compound recursion and variant switches as M2,
   generalized to horizontal slowness): p-dependent interface coefficients via

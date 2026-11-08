@@ -10,6 +10,11 @@ boundary.  Every angle-gather panel states the amplitude convention
 (plane-wave pressures, no geometric spreading).  Every figure-writing script
 saves deterministic filenames under ``output/`` and shows interactively unless
 ``--no-show`` is given.
+
+M4 scope: offset gathers -- variable-density panels (offset vs two-way time)
+with parametric theoretical-moveout overlays ``(x(p), T(p))`` from Snell ray
+tracing.  Panels state the 2-D line-source plane-wave synthesis convention
+(sqrt-omega wavelet, ``1/sqrt(2 pi |dx/dp|)`` focusing, no 3-D spreading).
 """
 
 from collections.abc import Mapping
@@ -25,7 +30,9 @@ from mm1d.reflectivity import ALL_VARIANTS, WavefieldVariant
 __all__ = [
     "VARIANT_LABELS",
     "angle_gather_stack_figure",
+    "offset_gather_stack_figure",
     "plot_angle_gather",
+    "plot_offset_gather",
     "plot_trace_panel",
     "zero_offset_stack_figure",
 ]
@@ -218,6 +225,127 @@ def angle_gather_stack_figure(
             mute_angle_deg=mute_angle_deg,
         )
     axes[-1].set_xlabel("incidence angle deg")
+    fig.suptitle(suptitle)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    return fig
+
+
+def plot_offset_gather(
+    ax: Axes,
+    offsets_m: NDArray[np.float64],
+    t_s: NDArray[np.float64],
+    traces: NDArray[np.float64],
+    *,
+    title: str = "",
+    moveout: Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]] | None = None,
+) -> None:
+    """Plot one offset-gather panel as a variable-density image.
+
+    Parameters
+    ----------
+    ax : Axes
+        Target axes.
+    offsets_m : ndarray
+        Offset grid, m (assumed uniform for pixel edges; first trace at
+        ``x = 0`` is the zero-offset location).
+    t_s : ndarray
+        Sample times, s (uniform, starting at 0).
+    traces : ndarray
+        Gather traces, shape ``(n_offsets, n_samples)``.
+    title : str, optional
+        Panel title.
+    moveout : mapping, optional
+        Label -> ``(x_s_m, t_s)`` parametric moveout curve of one event (from
+        :func:`mm1d.gathers.path_offset_time` / :func:`mm1d.gathers.primary_offset_times`;
+        ``NaN`` entries are skipped); drawn as dashed curves.
+    """
+    offsets = np.asarray(offsets_m, dtype=np.float64)
+    times = np.asarray(t_s, dtype=np.float64)
+    d_offset = offsets[1] - offsets[0] if offsets.size > 1 else 1.0
+    dt = times[1] - times[0] if times.size > 1 else 1.0
+    extent = (
+        offsets[0] - d_offset / 2.0,
+        offsets[-1] + d_offset / 2.0,
+        times[-1] + dt,  # bottom edge (imshow with origin='upper')
+        0.0,  # top edge
+    )
+    peak = float(np.max(np.abs(traces)))
+    scale = peak if peak > 0.0 else 1.0
+    ax.imshow(
+        traces.T,
+        extent=extent,
+        origin="upper",
+        aspect="auto",
+        cmap="seismic",
+        vmin=-scale,
+        vmax=scale,
+        interpolation="nearest",
+    )
+    if moveout:
+        for label, (x_curve, t_curve) in moveout.items():
+            x_curve = np.asarray(x_curve, dtype=np.float64)
+            t_curve = np.asarray(t_curve, dtype=np.float64)
+            ax.plot(x_curve, t_curve, "k--", lw=0.9)
+            valid = np.flatnonzero(np.isfinite(t_curve) & np.isfinite(x_curve))
+            if valid.size:
+                ax.text(
+                    x_curve[valid[0]],
+                    t_curve[valid[0]] + 0.012 * extent[2],
+                    label,
+                    color="k",
+                    fontsize=8,
+                    va="bottom",
+                )
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylabel("two-way time s")
+    if title:
+        ax.set_title(title, fontsize=9)
+
+
+def offset_gather_stack_figure(
+    offsets_m: NDArray[np.float64],
+    t_s: NDArray[np.float64],
+    panels: Mapping[WavefieldVariant, NDArray[np.float64]],
+    *,
+    suptitle: str,
+    moveout: Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]] | None = None,
+) -> Figure:
+    """Stacked comparison figure of offset gathers (canonical variant order).
+
+    Parameters
+    ----------
+    offsets_m : ndarray
+        Offset grid, m (shared horizontal axis).
+    t_s : ndarray
+        Sample times, s (shared vertical axis).
+    panels : mapping
+        Variant name -> gather traces ``(n_offsets, n_samples)``; missing
+        variants of :data:`~mm1d.reflectivity.ALL_VARIANTS` are skipped.
+    suptitle : str
+        Figure title.
+    moveout : mapping, optional
+        Label -> ``(x, t)`` moveout curves; see :func:`plot_offset_gather`.
+
+    Returns
+    -------
+    Figure
+        Unsaved figure with one row per variant (``full`` on top), shared
+        offset/time axes.
+    """
+    present = [v for v in ALL_VARIANTS if v in panels]
+    fig = plt.figure(figsize=(11.0, 1.4 + 2.6 * len(present)))
+    axes = fig.subplots(len(present), 1, sharex=True, sharey=True, squeeze=False)[:, 0]
+    for ax, variant in zip(axes, present, strict=True):
+        plot_offset_gather(
+            ax,
+            offsets_m,
+            t_s,
+            panels[variant],
+            title=VARIANT_LABELS[variant],
+            moveout=moveout,
+        )
+    axes[-1].set_xlabel("offset m")
     fig.suptitle(suptitle)
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
     return fig
