@@ -25,10 +25,13 @@ within about one velocity cell.
   (:func:`mm1d.semblance.scan_slowness_bound` = ``(1 - 0.15) * p_end``) --
   beyond the taper the M4 synthesis documents attenuated, phase-shifted
   event tails (e.g. P1 of T2 is clean only to ~280 m).
-- **Noise floor**: 1 % of gather peak, seeded -- Neidell-Taner semblance is
-  scale-free, so noise-free deterministic gathers tie near ``S = 1`` across
-  the whole wavelet extent; the incoherent floor (field-data reality) makes
-  the maxima well-posed at the alignment cells.
+- **Noise floor**: zero by default. --noise-fraction .01 enables an explicitly
+  labelled seeded experiment, not artifact removal. Noiseless coherence ties
+  may broaden peaks; unrestricted 2-D argmax is not a unique velocity pick.
+- **Backend**: --backend ray uses untapered ray support and sample validity,
+  NOT the legacy taper-clean restriction. Outputs include fold maps and NPZ
+  arrays, plus compact event tables separate from the full synthesis catalog.
+  Ray filenames carry _ray; the default backend remains slant.
 - **Gate**: one dominant period (50 ms at 20 Hz), the Neidell-Taner choice;
   the sqrt(omega)-reshaped wavelet keeps isolated events coherent (S -> 1)
   while 100 ms-separated neighbours do not interfere.
@@ -54,15 +57,17 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
+from mm1d.events import display_events, enumerate_events
 from mm1d.gathers import SURFACE, offset_gather, path_offset_time
 from mm1d.io import load_blocked_model
+from mm1d.ray import ray_offset_gather
 from mm1d.reflectivity import ALL_VARIANTS
 from mm1d.semblance import (
     default_t0_grid,
     default_velocity_grid,
     dix_rms_velocities,
     scan_slowness_bound,
-    semblance_panel,
+    semblance_with_fold,
 )
 from mm1d.viz import (
     VARIANT_LABELS,
@@ -98,7 +103,7 @@ SPREAD_CAP_M_PER_S = 1100.0
 (m/s x s -> m; ~1.1 m per ms of two-way time -- a moderate spread, see the
 module docstring)."""
 
-NOISE_FLOOR_FRACTION = 0.01
+NOISE_FLOOR_FRACTION = 0.0
 """Seeded incoherent noise floor added to scan gathers, fraction of peak."""
 
 NOISE_SEED = 20261110
@@ -111,7 +116,7 @@ MODEL_RECORDS_S: dict[str, float] = {
 }
 """Display record length per canonical model, s (PLAN.md defaults)."""
 
-SCAN_NOTE = "Neidell-Taner, 50 ms gate, hyperbolic, x <= 1.1 km/s x T0, 1% noise floor"
+SCAN_NOTE = "Neidell-Taner, 50 ms gate, hyperbolic, noiseless by default"
 """Scan-convention statement carried on every semblance panel (kept short:
  it must fit the single-panel figure width)."""
 
@@ -123,6 +128,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--no-show",
         action="store_true",
         help="do not open interactive figure windows (figures are still saved)",
+    )
+    parser.add_argument("--backend", choices=("slant", "ray"), default="slant")
+    parser.add_argument(
+        "--noise-fraction",
+        type=float,
+        default=NOISE_FLOOR_FRACTION,
+        help="optional seeded noise experiment; default raw noiseless gathers",
     )
     return parser
 
@@ -136,14 +148,14 @@ def scan_setup(model, record_s: float) -> tuple[np.ndarray, np.ndarray, np.ndarr
     return offsets, t0_grid, v_grid
 
 
-def reference_overlays(model) -> SemblanceOverlay:
+def reference_overlays(model, variant="full") -> SemblanceOverlay:
     """Return the reference ``(t0, v)`` overlay curves: Dix primaries + velocity pins."""
     dix_t0 = model.interface_twt_s
     dix_v = dix_rms_velocities(model)
     entries: list[tuple[str, tuple[np.ndarray, ...] | tuple[np.ndarray, np.ndarray, str]]] = [
-        ("Dix V_rms", (dix_t0, dix_v))
+        ("Dix V_rms", (dix_t0, dix_v, "wo--"))
     ]
-    if model.name == "water_bottom":
+    if model.name == "water_bottom" and variant == "full":
         # surface multiples of the water bottom are pinned at the water
         # velocity at every order -- a horizontal reference line (dotted, to
         # distinguish the pin from the Dix curve)
@@ -199,17 +211,37 @@ def local_pick(
     return float(t0_grid[t_indices[i_t]]), float(v_grid[v_indices[i_v]]), float(window[i_v, i_t])
 
 
-def scan_gather(model, variant, offsets, n_samples, n_fft):
-    """Synthesize one scan gather and add the seeded incoherent noise floor."""
-    gather = offset_gather(
-        model, variant, ANGLES_DEG, offsets, DT_S, n_samples, F_DOM_HZ, n_fft=n_fft
-    )
+def scan_gather(model, variant, offsets, n_samples, n_fft, backend="slant", noise_fraction=0.0):
+    """Return gather, sample validity and backend-specific slowness bound (s/m)."""
+    if not np.isfinite(noise_fraction) or noise_fraction < 0:
+        raise ValueError("noise fraction must be finite and nonnegative")
+    if backend == "ray":
+        result = ray_offset_gather(model, variant, offsets, DT_S, n_samples, F_DOM_HZ)
+        gather, valid, p_bound = result.traces, result.valid_samples, result.p_max_s_m
+        # Display selection is intentionally separate from the synthesis set.
+        table = ["| path | family | T0 s | RMS m/s |", "|---|---|---:|---:|"]
+        table += [
+            f"| {e.turning_points} | {e.family} | {e.t0_s:.4f} | {e.vrms_m_s:.1f} |"
+            for e in display_events(model, result.catalog)
+        ]
+        (OUTPUT_DIR / f"events_{model.name}_{variant}.md").write_text(
+            f"Bounds: {result.catalog.reached_bounds}; "
+            f"synthesis paths: {len(result.catalog.events)}. "
+            "Display only: order <=3, |A(0)| >=0.01. "
+            "RMS is small-spread, not finite-offset fit.\n\n" + "\n".join(table) + "\n"
+        )
+    else:
+        gather = offset_gather(
+            model, variant, ANGLES_DEG, offsets, DT_S, n_samples, F_DOM_HZ, n_fft=n_fft
+        )
+        valid = np.ones(gather.shape, dtype=bool)
+        p_bound = scan_slowness_bound(model, ANGLES_DEG)
     rng = np.random.default_rng(NOISE_SEED)
-    sigma = NOISE_FLOOR_FRACTION * float(np.abs(gather).max())
-    return gather + rng.normal(0.0, sigma, gather.shape)
+    sigma = noise_fraction * float(np.abs(gather).max())
+    return gather + rng.normal(0.0, sigma, gather.shape), valid, p_bound
 
 
-def generate_figures() -> list[Path]:
+def generate_figures(backend="slant", noise_fraction=0.0) -> list[Path]:
     """Compute all variant semblance panels for T1/T2/T3 and save the M5 figure set."""
     saved: list[Path] = []
     for model_name, record_s in MODEL_RECORDS_S.items():
@@ -217,14 +249,62 @@ def generate_figures() -> list[Path]:
         n_samples = round(record_s / DT_S)
         n_fft = FFT_OVERSAMPLE * n_samples
         offsets, t0_grid, v_grid = scan_setup(model, record_s)
-        p_bound = scan_slowness_bound(model, ANGLES_DEG)
-        overlay = reference_overlays(model)
         panels = {}
+        overlays = {}
+        suffix = "_ray" if backend == "ray" else ""
+        if noise_fraction:
+            suffix += f"_noise{noise_fraction:g}"
+        note = (
+            f"{backend} backend; 50 ms gate; noise {100 * noise_fraction:g}%\n"
+            "fold/support saved separately"
+        )
         for variant in ALL_VARIANTS:
-            gather = scan_gather(model, variant, offsets, n_samples, n_fft)
-            panels[variant] = semblance_panel(
-                gather, offsets, DT_S, t0_grid, v_grid, GATE_S, p_mute_s_m=p_bound
+            gather, valid, p_bound = scan_gather(
+                model, variant, offsets, n_samples, n_fft, backend, noise_fraction
             )
+            scan = semblance_with_fold(
+                gather,
+                offsets,
+                DT_S,
+                t0_grid,
+                v_grid,
+                GATE_S,
+                p_mute_s_m=p_bound,
+                valid_samples=valid,
+            )
+            panels[variant] = scan.panel
+            overlay = dict(reference_overlays(model, variant))
+            if backend == "ray":
+                selected = display_events(model, enumerate_events(model, variant, record_s))
+                for family in ("surface", "interbed", "mixed"):
+                    family_events = [e for e in selected if e.family == family]
+                    if family_events:
+                        overlay[f"{family} RMS"] = (
+                            np.array([e.t0_s for e in family_events]),
+                            np.array([e.vrms_m_s for e in family_events]),
+                            "w.",
+                        )
+            overlays[variant] = overlay
+            np.savez(
+                OUTPUT_DIR / f"semblance_{model.name}_{variant}{suffix}.npz",
+                panel=scan.panel,
+                fold=scan.fold,
+                t0_s=t0_grid,
+                velocity_m_s=v_grid,
+            )
+            fold_fig, fold_ax = plt.subplots(figsize=(6.8, 6.4), layout="constrained")
+            image = fold_ax.pcolormesh(v_grid, t0_grid, scan.fold.T, vmin=0, vmax=N_OFFSETS)
+            fold_ax.invert_yaxis()
+            fold_ax.set(
+                xlabel="stacking velocity m/s",
+                ylabel="zero-offset time s",
+                title=f"{model.name} / {variant}: contributing traces\n{note}",
+            )
+            fold_fig.colorbar(image, ax=fold_ax, label="fold")
+            fold_path = OUTPUT_DIR / f"semblance_fold_{model.name}_{variant}{suffix}.png"
+            fold_fig.savefig(fold_path, dpi=150)
+            plt.close(fold_fig)
+            saved.append(fold_path)
 
             fig, ax = plt.subplots(figsize=(6.8, 6.4), layout="constrained")
             plot_semblance(
@@ -232,10 +312,10 @@ def generate_figures() -> list[Path]:
                 v_grid,
                 t0_grid,
                 panels[variant],
-                title=f"{model.name} -- {VARIANT_LABELS[variant]}\n{SCAN_NOTE}",
+                title=f"{model.name} -- {VARIANT_LABELS[variant]}\n{note}",
                 overlay=overlay,
             )
-            path = OUTPUT_DIR / f"semblance_{model.name}_{variant}.png"
+            path = OUTPUT_DIR / f"semblance_{model.name}_{variant}{suffix}.png"
             fig.savefig(path, dpi=150)
             plt.close(fig)
             saved.append(path)
@@ -244,17 +324,17 @@ def generate_figures() -> list[Path]:
             v_grid,
             t0_grid,
             panels,
-            suptitle=f"{model.name}: semblance panels (scan note in panel titles)",
-            overlay=overlay,
+            suptitle=f"{model.name}: semblance panels\n{note}",
+            overlay_by_variant=overlays,
         )
-        path = OUTPUT_DIR / f"semblance_{model.name}_stack.png"
+        path = OUTPUT_DIR / f"semblance_{model.name}_stack{suffix}.png"
         stack.savefig(path, dpi=150)
         plt.close(stack)
         saved.append(path)
     return saved
 
 
-def print_numeric_checks() -> None:
+def print_numeric_checks(backend="slant", noise_fraction=0.0) -> None:
     """Print the M5 acceptance anchors: Dix primaries, pinned multiples, peg-leg."""
     t1 = load_blocked_model(DATA_DIR / "single_interface.csv")
     t2 = load_blocked_model(DATA_DIR / "water_bottom.csv")
@@ -264,19 +344,27 @@ def print_numeric_checks() -> None:
         n_samples = round(record_s / DT_S)
         n_fft = FFT_OVERSAMPLE * n_samples
         offsets, t0_grid, v_grid = scan_setup(model, record_s)
-        p_bound = scan_slowness_bound(model, ANGLES_DEG)
         panels = {}
         for variant in ALL_VARIANTS:
-            gather = scan_gather(model, variant, offsets, n_samples, n_fft)
-            panels[variant] = semblance_panel(
-                gather, offsets, DT_S, t0_grid, v_grid, GATE_S, p_mute_s_m=p_bound
+            gather, valid, p_bound = scan_gather(
+                model, variant, offsets, n_samples, n_fft, backend, noise_fraction
             )
+            panels[variant] = semblance_with_fold(
+                gather,
+                offsets,
+                DT_S,
+                t0_grid,
+                v_grid,
+                GATE_S,
+                p_mute_s_m=p_bound,
+                valid_samples=valid,
+            ).panel
         return offsets, t0_grid, v_grid, panels
 
     _, t0_t2, v_t2, panels_t2 = build_panels(t2, MODEL_RECORDS_S["water_bottom"])
     dix_t2 = dix_rms_velocities(t2)
 
-    print("== T2 primaries: semblance maxima vs Dix (M5 acceptance) ==")
+    print("== T2 primaries: free local argmax vs Dix (not unique on noiseless data) ==")
     print("  T0 Dix   Dix V    pick T0  pick V   S")
     for t0, v_dix in zip(t2.interface_twt_s, dix_t2, strict=True):
         p_t0, p_v, p_s = local_pick(panels_t2["primaries"], t0_t2, v_t2, float(t0), float(v_dix))
@@ -314,15 +402,16 @@ def print_numeric_checks() -> None:
 
     _, t0_t3, v_t3, panels_t3 = build_panels(t3, MODEL_RECORDS_S["thick_5layer"])
     dix_t3 = dix_rms_velocities(t3)
-    print("\n== T3 primaries: semblance maxima vs Dix ==")
+    print("\n== T3 primaries: free local argmax vs Dix (noiseless ties can bias picks) ==")
     print("  T0 Dix   Dix V    pick T0  pick V   S")
     for t0, v_dix in zip(t3.interface_twt_s, dix_t3, strict=True):
         p_t0, p_v, p_s = local_pick(panels_t3["primaries"], t0_t3, v_t3, float(t0), float(v_dix))
         print(f"  {t0:.2f} {v_dix:7.1f} {p_t0:9.4f} {p_v:8.1f} {p_s:6.3f}")
 
-    bound = scan_slowness_bound(t2, ANGLES_DEG)
-    print(f"\n(scan slowness bound {bound:.3e} s/m = 0.85 x p_end: taper-clean aperture;")
-    print(" shallow-interface picks carry the ~+/-100 m/s resolution floor)")
+    print(
+        f"\nBackend={backend}, noise={100 * noise_fraction:g}%. "
+        "RMS anchors are small-spread; noiseless coherence ties are not unique velocity picks."
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -331,8 +420,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.no_show:
         matplotlib.use("Agg")
     OUTPUT_DIR.mkdir(exist_ok=True)
-    print_numeric_checks()
-    for path in generate_figures():
+    print_numeric_checks(args.backend, args.noise_fraction)
+    for path in generate_figures(args.backend, args.noise_fraction):
         print(f"saved: {path}")
     if not args.no_show:
         plt.show()

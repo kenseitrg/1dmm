@@ -22,18 +22,14 @@ synthesis -- the |omega| rho-filter reshapes the Ricker wavelet by
 sqrt(omega) and event peaks scale as A(p*)/sqrt(2 pi |dx/dp|); no 3-D
 geometric spreading; amplitudes are continuous through x = 0.
 
-Artifact control (the synthesis integral is not the naive one): the
-slowness aperture is refined internally to the anti-aliasing limit for the
-requested offsets and carries a Tukey taper over its last 15 % (below the
-post-critical mute where one applies).  Literal FFT wrap-around is
-negligible at the 8x record extension (< 3e-5 of peak); the taper
-suppresses the acausal radiation of the hard aperture truncation (worst
-just below the mute, where |U| grows toward resonance) from ~3 % to ~1 %
-of peak, and stationary rays inside the taper zone (the last few degrees,
-far offsets of the shallow events) are attenuated gracefully.  The residual
-near-offset pre-event ramp (a few % of peak) is the events' own
-non-stationary aperture content -- the finite-aperture price of
-amplitude-preserving synthesis.
+Use --backend ray for clean diagnostic path deposition (pressure R/T,
+unit-peak Ricker, no spreading). Default remains --backend slant, with
+response-aware waveform convergence and a 15% aperture taper. Quadrature
+convergence does not remove finite-aperture distortion or guarantee exact
+measured peaks. Ray support is event-specific; grey regions show unsupported
+event windows. Ray filenames carry _ray; shared variant display scales do
+not change the underlying amplitudes. See scripts/check_artifacts.py for
+unclipped near-offset and isolated weak-event waveform comparisons.
 
 Numeric checks printed to stdout: T1 primary picks on the closed-form
 hyperbola and stationary-phase amplitude ratios; the zero-offset trace of
@@ -64,6 +60,7 @@ from mm1d.gathers import (
     slowness_from_angle,
 )
 from mm1d.io import load_blocked_model
+from mm1d.ray import ray_offset_gather
 from mm1d.reflectivity import ALL_VARIANTS
 from mm1d.viz import VARIANT_LABELS, offset_gather_stack_figure, plot_offset_gather
 
@@ -108,10 +105,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not open interactive figure windows (figures are still saved)",
     )
+    parser.add_argument("--backend", choices=("slant", "ray"), default="slant")
     return parser
 
 
-def model_moveout_curves(model) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+def model_moveout_curves(model, variant="full") -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """Theoretical moveout overlays ``(x(p), T(p))`` for one model.
 
     Primaries for every interface, plus the canonical multiple family of the
@@ -120,6 +118,9 @@ def model_moveout_curves(model) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """
     x_primary, t_primary = primary_offset_times(model, ANGLES_DEG)
     curves = {f"P{k + 1}": (x_primary[:, k], t_primary[:, k]) for k in range(model.n_interfaces)}
+    if model.name == "single_interface":
+        curves["M1"] = path_offset_time(model, [SURFACE, 0] * 2 + [SURFACE], ANGLES_DEG)
+        curves["M2"] = path_offset_time(model, [SURFACE, 0] * 3 + [SURFACE], ANGLES_DEG)
     if model.name == "water_bottom":
         curves["M_wb1"] = path_offset_time(model, [SURFACE, 0, SURFACE, 0, SURFACE], ANGLES_DEG)
         curves["M_wb2"] = path_offset_time(model, [SURFACE, 0] * 3 + [SURFACE], ANGLES_DEG)
@@ -132,10 +133,24 @@ def model_moveout_curves(model) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         # destructively interfering with it near offset, separating beyond
         # ~20 deg incidence (the P4-attenuation signature in the full variant)
         curves["peg13"] = path_offset_time(model, [SURFACE, 0, SURFACE, 2, SURFACE], ANGLES_DEG)
+    curves = {
+        name: curve
+        for name, curve in curves.items()
+        if name.startswith("P")
+        or variant == "full"
+        or (variant == "no_surface" and name.startswith("interbed"))
+    }
+    p_mute = critical_mute_slowness(model)
+    if p_mute is not None:
+        ok = np.asarray(slowness_from_angle(ANGLES_DEG, model.vp_m_s[0])) < p_mute * (1 - 1e-6)
+        curves = {
+            name: (np.where(ok, x, np.nan), np.where(ok, t, np.nan))
+            for name, (x, t) in curves.items()
+        }
     return curves
 
 
-def generate_figures() -> list[Path]:
+def generate_figures(backend="slant") -> list[Path]:
     """Compute all variant offset gathers for T1/T2/T3 and save the M4 figure set."""
     saved: list[Path] = []
     for model_name, record_s in MODEL_RECORDS_S.items():
@@ -144,25 +159,51 @@ def generate_figures() -> list[Path]:
         n_fft = FFT_OVERSAMPLE * n_samples
         t_s = np.arange(n_samples, dtype=np.float64) * DT_S
         offsets = default_offset_grid(model, ANGLES_DEG, n_offsets=N_OFFSETS)
-        moveout = model_moveout_curves(model)
+        moveouts = {v: model_moveout_curves(model, v) for v in ALL_VARIANTS}
         panels = {}
-        for variant in ALL_VARIANTS:
-            panels[variant] = offset_gather(
-                model, variant, ANGLES_DEG, offsets, DT_S, n_samples, F_DOM_HZ, n_fft=n_fft
+        validity = {}
+        note = (
+            (
+                "ray diagnostic: pressure R/T, unit Ricker, no spreading\n"
+                "grey = unsupported event windows; shared variant scale"
             )
-
+            if backend == "ray"
+            else (
+                "slant synthesis: sqrt(omega) wavelet, A/sqrt(2 pi |dx/dp|)\n"
+                "tapered aperture; shared variant scale"
+            )
+        )
+        suffix = "_ray" if backend == "ray" else ""
+        for variant in ALL_VARIANTS:
+            if backend == "ray":
+                result = ray_offset_gather(model, variant, offsets, DT_S, n_samples, F_DOM_HZ)
+                panels[variant], validity[variant] = result.traces, result.valid_samples
+                print(
+                    f"{model.name}/{variant}: {len(result.catalog.events)} paths, "
+                    f"bounds={result.catalog.reached_bounds}, unsupported="
+                    f"{np.count_nonzero(~result.supported)}/{result.supported.size}"
+                )
+            else:
+                panels[variant] = offset_gather(
+                    model, variant, ANGLES_DEG, offsets, DT_S, n_samples, F_DOM_HZ, n_fft=n_fft
+                )
+                validity[variant] = np.ones(panels[variant].shape, dtype=bool)
+        scale = max(float(np.max(np.abs(d))) for d in panels.values())
+        for variant in ALL_VARIANTS:
             fig, ax = plt.subplots(figsize=(11.0, 5.2))
             plot_offset_gather(
                 ax,
                 offsets,
                 t_s,
                 panels[variant],
-                title=f"{model.name} -- {VARIANT_LABELS[variant]}  ({AMPLITUDE_NOTE})",
-                moveout=moveout,
+                title=f"{model.name} -- {VARIANT_LABELS[variant]}\n{note}",
+                moveout=moveouts[variant],
+                amplitude_scale=scale,
+                valid_samples=validity[variant],
             )
             ax.set_xlabel("offset m")
             fig.tight_layout()
-            path = OUTPUT_DIR / f"offset_gather_{model.name}_{variant}.png"
+            path = OUTPUT_DIR / f"offset_gather_{model.name}_{variant}{suffix}.png"
             fig.savefig(path, dpi=150)
             plt.close(fig)
             saved.append(path)
@@ -171,10 +212,11 @@ def generate_figures() -> list[Path]:
             offsets,
             t_s,
             panels,
-            suptitle=f"{model.name}: offset gathers, Ricker {F_DOM_HZ:g} Hz -- {AMPLITUDE_NOTE}",
-            moveout=moveout,
+            suptitle=f"{model.name}: offset gathers, {F_DOM_HZ:g} Hz\n{note}",
+            moveout_by_variant=moveouts,
+            validity=validity,
         )
-        path = OUTPUT_DIR / f"offset_gather_{model.name}_stack.png"
+        path = OUTPUT_DIR / f"offset_gather_{model.name}_stack{suffix}.png"
         stack.savefig(path, dpi=150)
         plt.close(stack)
         saved.append(path)
@@ -276,7 +318,7 @@ def print_numeric_checks() -> None:
         scale = float(np.sum(got * want) / np.sum(want * want))
         print(
             f"  {model.name:16s} {variant:9s}: corr = {corr:.4f}, scale = {scale:.4f} "
-            f"(finite-aperture corrections; event times exact)"
+            f"(finite-aperture corrections; ray/group-time reference)"
         )
 
     p_mute = critical_mute_slowness(load_blocked_model(DATA_DIR / "water_bottom.csv"))
@@ -289,8 +331,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.no_show:
         matplotlib.use("Agg")
     OUTPUT_DIR.mkdir(exist_ok=True)
-    print_numeric_checks()
-    for path in generate_figures():
+    if args.backend == "slant":
+        print_numeric_checks()
+    for path in generate_figures(args.backend):
         print(f"saved: {path}")
     if not args.no_show:
         plt.show()

@@ -254,6 +254,8 @@ def plot_offset_gather(
     *,
     title: str = "",
     moveout: Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]] | None = None,
+    amplitude_scale: float | None = None,
+    valid_samples: NDArray[np.bool_] | None = None,
 ) -> None:
     """Plot one offset-gather panel as a variable-density image.
 
@@ -274,6 +276,10 @@ def plot_offset_gather(
         Label -> ``(x_s_m, t_s)`` parametric moveout curve of one event (from
         :func:`mm1d.gathers.path_offset_time` / :func:`mm1d.gathers.primary_offset_times`;
         ``NaN`` entries are skipped); drawn as dashed curves.
+    amplitude_scale : float, optional
+        Shared symmetric pressure display limit; default trace peak (no clip).
+    valid_samples : ndarray of bool, optional
+        Shape matching traces; unsupported regions shown grey, not as zeros.
     """
     offsets = np.asarray(offsets_m, dtype=np.float64)
     times = np.asarray(t_s, dtype=np.float64)
@@ -285,28 +291,34 @@ def plot_offset_gather(
         times[-1] + dt,  # bottom edge (imshow with origin='upper')
         0.0,  # top edge
     )
-    peak = float(np.max(np.abs(traces)))
+    peak = float(np.max(np.abs(traces))) if amplitude_scale is None else amplitude_scale
     scale = peak if peak > 0.0 else 1.0
+    data = np.ma.array(traces, mask=False if valid_samples is None else ~valid_samples)
+    cmap = plt.get_cmap("seismic").copy()
+    cmap.set_bad("0.85")
     ax.imshow(
-        traces.T,
+        data.T,
         extent=extent,
         origin="upper",
         aspect="auto",
-        cmap="seismic",
+        cmap=cmap,
         vmin=-scale,
         vmax=scale,
         interpolation="nearest",
     )
     if moveout:
-        for label, (x_curve, t_curve) in moveout.items():
+        for curve_index, (label, (x_curve, t_curve)) in enumerate(moveout.items()):
             x_curve = np.asarray(x_curve, dtype=np.float64)
             t_curve = np.asarray(t_curve, dtype=np.float64)
             ax.plot(x_curve, t_curve, "k--", lw=0.9)
             valid = np.flatnonzero(np.isfinite(t_curve) & np.isfinite(x_curve))
             if valid.size:
+                label_index = valid[
+                    int(0.65 * curve_index / max(len(moveout), 1) * (valid.size - 1))
+                ]
                 ax.text(
-                    x_curve[valid[0]],
-                    t_curve[valid[0]] + 0.012 * extent[2],
+                    x_curve[label_index],
+                    t_curve[label_index] + 0.012 * extent[2],
                     label,
                     color="k",
                     fontsize=8,
@@ -326,6 +338,11 @@ def offset_gather_stack_figure(
     *,
     suptitle: str,
     moveout: Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]] | None = None,
+    moveout_by_variant: Mapping[
+        WavefieldVariant, Mapping[str, tuple[NDArray[np.float64], NDArray[np.float64]]]
+    ]
+    | None = None,
+    validity: Mapping[WavefieldVariant, NDArray[np.bool_]] | None = None,
 ) -> Figure:
     """Stacked comparison figure of offset gathers (canonical variant order).
 
@@ -352,6 +369,7 @@ def offset_gather_stack_figure(
     present = [v for v in ALL_VARIANTS if v in panels]
     fig = plt.figure(figsize=(11.0, 1.4 + 2.6 * len(present)))
     axes = fig.subplots(len(present), 1, sharex=True, sharey=True, squeeze=False)[:, 0]
+    scale = max(float(np.max(np.abs(panels[v]))) for v in present)
     for ax, variant in zip(axes, present, strict=True):
         plot_offset_gather(
             ax,
@@ -359,7 +377,9 @@ def offset_gather_stack_figure(
             t_s,
             panels[variant],
             title=VARIANT_LABELS[variant],
-            moveout=moveout,
+            moveout=moveout_by_variant[variant] if moveout_by_variant is not None else moveout,
+            amplitude_scale=scale,
+            valid_samples=validity[variant] if validity is not None else None,
         )
     axes[-1].set_xlabel("offset m")
     fig.suptitle(suptitle)
@@ -471,6 +491,7 @@ def semblance_stack_figure(
     *,
     suptitle: str,
     overlay: SemblanceOverlay | None = None,
+    overlay_by_variant: Mapping[WavefieldVariant, SemblanceOverlay] | None = None,
 ) -> Figure:
     """Column comparison figure of semblance panels (canonical variant order).
 
@@ -513,7 +534,7 @@ def semblance_stack_figure(
             t0_grid_s,
             panels[variant],
             title=VARIANT_LABELS[variant],
-            overlay=overlay,
+            overlay=overlay_by_variant[variant] if overlay_by_variant is not None else overlay,
             colorbar=False,
         )
     assert image is not None  # present is non-empty by ALL_VARIANTS construction

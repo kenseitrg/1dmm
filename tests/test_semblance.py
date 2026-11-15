@@ -33,6 +33,7 @@ from mm1d.semblance import (
     dix_rms_velocities,
     scan_slowness_bound,
     semblance_panel,
+    semblance_with_fold,
 )
 
 DT_S = 2.0e-3
@@ -67,7 +68,50 @@ RECORDS_S: dict[str, float] = {
 """Display record length per canonical model, s."""
 
 
-# -- shared scan recipe (mirrors scripts/semblance.py) -------------------------
+def test_fold_and_missing_sample_support():
+    offsets = np.array([0.0, 100.0, 200.0, 300.0])
+    dt = 0.002
+    times = np.arange(600) * dt
+    arrivals = np.sqrt(0.5**2 + (offsets / 2000.0) ** 2)
+    gather = np.exp(-(((times[None, :] - arrivals[:, None]) / 0.02) ** 2))
+    valid = np.ones(gather.shape, dtype=bool)
+    valid[2:] = False
+    args = (gather, offsets, dt, np.array([0.5]), np.array([2000.0]), 0.02)
+    raw = semblance_with_fold(*args)
+    scan = semblance_with_fold(*args, valid_samples=valid)
+    assert raw.fold[0, 0] == 4
+    assert scan.fold[0, 0] == 2
+    assert scan.panel[0, 0] > 0.999
+    assert np.all(
+        semblance_with_fold(*args, valid_samples=valid, min_traces_fraction=0.8).panel == 0.0
+    )
+    with pytest.raises(ValueError, match="valid_samples"):
+        semblance_with_fold(*args, valid_samples=np.ones((2, 2), dtype=bool))
+
+
+def test_ray_primary_true_time_velocity_anchor(t1):
+    from mm1d.ray import ray_offset_gather
+
+    offsets = np.linspace(0.0, 400.0, 41)
+    result = ray_offset_gather(t1, "primaries", offsets, 0.002, 600, 20.0)
+    velocities = np.arange(1900.0, 2101.0, 5.0)
+    scan = semblance_with_fold(
+        result.traces,
+        offsets,
+        0.002,
+        np.array([0.5]),
+        velocities,
+        0.05,
+        p_mute_s_m=result.p_max_s_m,
+        valid_samples=result.valid_samples,
+    )
+    pick = velocities[np.argmax(scan.panel[:, 0])]
+    assert abs(pick - 2000.0) <= 5.0
+    assert np.max(scan.panel) > 0.99
+    assert np.all(scan.fold == 41)
+
+
+# -- shared scan recipe (legacy seeded-noise comparison) -------------------------
 
 
 def scan_offsets(model, n_offsets: int = 61) -> NDArray[np.float64]:

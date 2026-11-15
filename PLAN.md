@@ -155,7 +155,10 @@ hand-computed values for T1–T3 interfaces; `R²+T²=1` for all θ in grid.
   ray-tracing layer; see changelog 2026-11-09 for the design decision.
 - Script `scripts/offset_gathers.py` → `output/offset_gather_{model}_{variant}.png`.
 **Done when**:
-- Zero-offset trace preserved at x = 0; offset of T1 primary vs θ matches
+- At x = 0 the legacy slant stack preserves event families and approximate
+  interior arrival times, **not** the M2 waveform/amplitudes (rho-filter and
+  focusing differ). The additive diagnostic ray backend below provides the
+  R/T-only Ricker comparison. Offset of T1 primary vs θ matches
   closed-form 2h·tanθ; round-trip angle↔offset consistent within interpolation
   error; near/far offsets of the T2 water-bottom multiple follow the theoretical
   moveout `T(x) = sqrt(T0^2 + x^2/v_w^2)` — V_stk pinned at the water velocity,
@@ -166,7 +169,30 @@ hand-computed values for T1–T3 interfaces; `R²+T²=1` for all θ in grid.
   deeper section — not producible by T1–T3 (expectation corrected 2026-11-09,
   see changelog).
 
-### M5 — Semblance (`semblance.py`) ✅ (complete 2026-11-10)
+### M4.2 — P0 numerical corrections ✅ (HANDOVER follow-up, 2026-11-15)
+
+- [x] Constant-integrand regression tests first: short subcritical apertures end
+  at the requested endpoint; nonuniform/mute/taper cases retain nonnegative
+  weights and exclude muted nodes.
+- [x] Cutoff-straddling policy: explicitly evaluate `(1-1e-6)*p_critical` and
+  integrate to it, omitting the last 1 ppm sliver. Never extend an endpoint
+  weight across an unevaluated segment or evaluate the singular critical point.
+- [x] Kernel sampling is only an initial lower bound. Require **two successive
+  output waveform refinements** within `2e-4 * each trace peak + 1e-10`, including
+  x=0, all variants, T1–T3, Ricker/impulse bandwidths and repeated fine grids.
+- [x] Stream response in 32-p blocks; no p×frequency×offset temporary. The
+  16385-node guard raises `QuadratureConvergenceError` with residual/budget;
+  DEBUG logs expose successful counts/residuals. Untapered near-critical full
+  responses can fail this bound rather than silently returning aliased data.
+- [x] Original T3 primary reproducer: x=0 vs batches `[0,1000]`/`[0,4500]`
+  relative max errors **2.97e-8 / 3.66e-8**, fine 0.0625° reference **3.71e-8**
+  (previous single-offset error ~9.76e-2). Untapered 10°/20° aperture integral
+  errors reduced from +93.97%/+23.10% to floating-point precision.
+
+Finite-aperture distortion is separate: refinement does NOT promise clean
+Ricker waveforms or exact measured peaks near aperture edges.
+
+### M5 — Semblance (`semblance.py`) ✅ (original checkpoint 2026-11-10; support follow-up 2026-11-15)
 **Goal**: Neidell-Taner semblance panels per variant.
 - Sliding-window semblance over (T₀, V_stk) on hyperbolic moveout; shared for
   all three variants; parameter ranges auto-scaled from gather extent.
@@ -181,22 +207,92 @@ apparent velocities belong to fast-layer interbed generators (none in
 T1–T3; candidate T4 model for M6) — expectation corrected 2026-11-09,
 see changelog.
 
-### M6 — Event catalog & theoretical velocities (`events.py`, `viz.py` overlays)
-**Goal**: the multiple-identification payoff.
-- Path enumeration: primaries per interface; surface multiples (order n, any
-  reflector); interbed multiples (reflector pair, order n); peg-legs (surface +
-  one interbed leg). Bounded order (default ≤ 3) and amplitude threshold (default
-  |A| ≥ 0.01 of primary at same interface) to keep catalogs human-scale.
-- Per event: zero-offset T₀ (sum of legs), amplitude product (R/T chain),
-  stacking velocity V_stk = sqrt(Σ t_leg v_leg² / Σ t_leg).
-- Overlay plotting: (T₀, V_stk(T₀-offset)) trajectories on semblance panels,
-  event table printout.
-- Script `scripts/event_catalog.py` on T2 + T3 →
-  `output/semblance_events_{model}_{variant}.png` + `output/events_{model}.md`.
-**Done when**: primary curves pass through `primaries` semblance maxima (visual +
-numeric spot check); each cataloged surface multiple in T2 lands on a visible
-`full`-panel ridge; catalog explains every ridge visible in T2/T3 panels (no
-unexplained strong events).
+The original completion budgets above refer to the seeded legacy checkpoint.
+The HANDOVER follow-up keeps raw gathers noiseless by default, reports fold,
+and treats unconstrained local argmax shifts separately from fixed-time RMS
+anchors (see M6a); it does not claim one-cell picks on all raw ray panels.
+
+### M6a — Bounded paths + diagnostic synthesis ✅ (brought forward, 2026-11-15)
+
+**Decision confirmed with user:** additive `mm1d.ray.ray_offset_gather`, using
+pressure R/T path products, unit-peak Ricker, no spreading; existing
+`offset_gather` and its default/amplitudes are unchanged.
+
+- [x] Immutable `Event` and `EventCatalog`: alternating surface/interface turns,
+  traversal counts, family, zero-offset time, RMS velocity, directional R/T
+  interactions. Surface reflection is -1; underside reflection is -R. No surface
+  factor at source/receiver. Coefficients use a shared horizontal p, not a
+  surface angle incorrectly applied at a deeper interface.
+- [x] Enumerate by recording time + per-wavelet tail margin; default **32 total
+  interface + surface reflections**, receiver excluded; **100000 completed or
+  pending/visited states** resource guard. Reached bounds reported; overflow
+  raises `PathLimitError`. No synthesis amplitude pruning. Surface order counts
+  surface bounces; internal order counts underside bounces. Human display uses
+  order ≤3 and absolute |A(0)| ≥0.01, explicitly heuristic and separate.
+- [x] Keep all coincident orderings; reuse moveout for equal traversal counts
+  only AFTER coherently summing distinct path coefficient contributions.
+- [x] Bracketed Snell solutions and direct fractional-time Ricker evaluation;
+  global subcritical limit plus requested angle aperture, no slant taper.
+  Unsupported events have NaN arrival metadata, support flags, and invalid
+  sample windows; never clipped to the aperture or replaced by another backend.
+- [x] Independent anchors: T1 geometric train/hyperbolas and exact Ricker samples;
+  T2 water-velocity multiples; T3 underside/mixed paths and coincident peg-legs;
+  all variants against padded normal-incidence AND selected nonzero-p omega-p
+  time windows (test budget 2e-9 absolute). Primary frequency sums are numerical
+  precision; finite multiple frequency sums converge but are not exact infinite
+  responses (T2 full reflection orders 3/7/17: 0.432/0.177/0.0191 max errors).
+- [x] T3 4 s synthesis reflection-limit convergence 5/11/17/23/32: max waveform
+  differences vs 32 are 1.02e-2 / 2.16e-4 / 3.49e-17 / 0 / 0. The default
+  catalog has **3588 paths / 11914 states**, no reflection-bound hit. This is
+  evidence for this window/model, not a completeness guarantee for fine logs.
+- [x] Isolated weak T1 multiple: near/mid/far event-free windows tested against
+  analytic wavelet tails relative to the weak multiple, not only gather peak;
+  no added noise, forced x=0 replacement, stronger clipping or arbitrary mutes.
+
+**Integration / measured limits:**
+- `scripts/offset_gathers.py --backend ray` writes distinct `_ray` files;
+  shared scales across variants, appropriate-family overlays, grey missing-event
+  windows. `scripts/check_artifacts.py` writes unclipped normalized weak/near
+  waveform comparisons and `output/numerical_checks.json`.
+- `semblance_with_fold` returns actual contributing counts; accepts bool sample
+  validity. Ray scans use actual untapered support; legacy scans retain their
+  taper-clean bound. Existing ndarray-only `semblance_panel` API is preserved.
+- `scripts/semblance.py --backend ray` saves noiseless panels + fold PNG/NPZ and
+  display event tables; family RMS markers are variant-appropriate. Seeded noise
+  is optional (`--noise-fraction .01`) and explicitly labelled.
+- **Reassessed bias:** clean gathers do NOT make raw noiseless free local argmax
+  unique. T2 primary picks shift -95.7/-66.4 m/s with +48.5/+46.8 ms gate shifts;
+  T3 picks range about -84..+80 m/s. These are coherence ties/support and finite
+  spread effects, not proof of incorrect ray timing. A separate fixed-true-time
+  T1 velocity anchor is within 5 m/s; independent hand-built hyperbola tests stay.
+  The old one-cell deep-interface criterion is not asserted for unrestricted
+  noiseless argmax. Small-spread RMS remains distinct from finite-offset fitting.
+- At standard full offset demo spread T2 primaries have 49 unsupported
+  event/offset pairs of 122, T3 113/244; grey is missing support, not measured
+  zero energy. Validity is per wavelet window; missing per-event tails are bounded
+  only by the declared tolerance, not a proven whole infinite-series norm.
+- 4 s / three offsets `[0,200,600]`: x=0 max differences vs 32× padded plane-wave
+  traces ≤1.9e-15 across T1–T3/variants. Instrumented T3 full took ~1.82 s with
+  ~2.43 MB Python-traced peak allocation (not process RSS); timings vary. Slant
+  single/batch/fine reproducer total ~7.58 s; T1 full three-offset ~0.65 s.
+
+### M6b — Interpretation & finite-spread trajectories (remaining)
+
+**Goal:** complete multiple identification, not just a finite synthesis catalog.
+- [ ] Add finite-offset best-fit stacking trajectories separately from the
+  already plotted (T₀, small-spread RMS) anchors; print uncertainties/fold.
+- [ ] Attribute every strong T2/T3 semblance ridge and document noiseless ties,
+  interference and scan-cell support changes. Current family markers/tables are
+  aids, not a claim that every visible coherence streak is a distinct event.
+- [ ] Validate primary/surface ridge matches with explicit support/resolution
+  budgets; do not require unique raw argmax on wavelet tails or low-fold cells.
+- [ ] A fast-layer-over-slow T4 remains optional for higher-than-primary
+  interbed stacking velocities; not demonstrated by T1–T3.
+
+**Done when:** the interpretation report explains the supported strong ridges
+with independent moveout checks and separates resolution/nonhyperbolicity from
+multiple-family identification. Dedicated `event_catalog.py` is deferred:
+current display tables/anchors are integrated into `scripts/semblance.py`.
 
 ### M7 — Polish & real-log workflow
 **Goal**: first usable tool.
@@ -223,11 +319,36 @@ figure set; all quality gates green.
   interpolation order + mute beyond max offset (M4).
 - **Wavelet side lobes** vs "interpretable by eye" criterion on thick models:
   acceptable at 20 Hz with ≥ 250 ms TWT layers; revisit if TWT reduced.
+- **Runtime documentation discrepancy**: AGENTS.md requests Python 3.15 while
+  `.python-version`, pyproject and ty use 3.14. Existing uv environment retained;
+  reconcile in a dedicated runtime migration, not these physics fixes.
 - **Semblance bias for interfering events** in `full` gathers: compare against
   variant-separated panels — this is a feature of the tool, not a bug; make sure
   M6 report phrasing reflects it.
 
 ## Changelog
+
+- 2026-11-15: **HANDOVER implementation** — completed P0 aperture quadrature and
+  response-aware convergence; brought M6a bounded paths forward and added the
+  user-confirmed R/T-only diagnostic ray backend without changing slant defaults.
+  Added support-aware noiseless semblance/fold, backend-labelled demos, separate
+  display tables/RMS anchors and reproducible weak-event/numerical checks. Updated
+  README and corrected overbroad old timing/zero-offset/smearing statements.
+  M6b finite-spread interpretation remains explicitly open rather than claiming
+  every ridge is explained. Quality gates: ruff check, ty check, **294 pytest
+  tests passed** (baseline 199); changed-file format check and diff check pass. Figure
+  sets for both backends generated with --no-show and inspected directly.
+  T2 ray panels show the water-bottom multiple ridge near 1500 m/s in full only;
+  T3 ray primaries show four arrivals/Dix anchors, with no surface-family overlay;
+  grey far-offset wavelet windows correctly expose unsupported rays. Normalized
+  weak-event plots retain visible slant pre-event content but no unexplained ray
+  energy outside analytic tails. T1 0.05–0.35 s leakage relative to the isolated
+  weak second surface-multiple peak at offsets 0/200/600 m: slant
+  0.125/0.528/0.196; ray ≤4.8e-37 (analytic Ricker tails). These are different
+  amplitude/wavelet conventions, not a samplewise equality test. Fold panels
+  expose support variation; noiseless
+  coherence streaks/late-tail ties remain visible, not hidden with noise or mutes.
+  Python 3.14/3.15 documentation discrepancy recorded without runtime migration.
 
 - 2026-11-10: **M5 figure rework (user request)** — semblance panels rotated to
   the seismic-section convention: zero-offset time is now the *vertical* axis
@@ -311,12 +432,14 @@ figure set; all quality gates green.
   pre-event energy 3.3 % → 1.2 % of peak, far-offset pre-event 3.2 % →
   1.2 %, stationary-phase anchors unchanged for θ ≤ 15° (≤ 0.4 %; the
   20° anchor sits in the taper-skirt interference band, ≤ 10 %), event
-  times everywhere exact, round trip unchanged (corr ≈ 0.96, scale ≈
+  interior picks within the tested timing tolerance (not a universal
+  edge/overlap peak guarantee), round trip unchanged (corr ≈ 0.96, scale ≈
   0.88-0.95).  The residual near-offset pre-event ramp (a few % of peak,
-  deepest events worst) is the events' own non-stationary aperture content —
-  the finite-aperture price of amplitude-preserving synthesis; removing it
-  entirely would require catalog-driven deposition (rejected at M4 for
-  M5/M6 circularity).  Tests: grid-equivalence mute test replaced (the
+  deepest events worst) was originally attributed entirely to finite-aperture
+  content. **Superseded by M4.2:** quadrature was not response-aware, so that
+  blanket attribution was unjustified. Converged synthesis still has aperture
+  smearing; the additive independently validated ray backend now supplies clean
+  diagnostic Ricker deposition (the earlier rejection has been revisited).  Tests: grid-equivalence mute test replaced (the
   near-mute resonant sliver made it meaningless — 0-40° vs 0-29° differ by
   ~5-8 % through different quadratures of a near-singular integrand) by
   exact weights-level mute exclusion + behavioral causality/taper tests +
@@ -355,7 +478,8 @@ figure set; all quality gates green.
   the `e^{−iωpx}` branch gave a spurious factor-2 jump at x = 0; the
   mirrored cos kernel fixed it). Stationary rays within ~a Fresnel zone of
   the aperture edge or mute ring up +10–20 % then fade (edge diffraction;
-  times stay exact; vanishes with a wider aperture grid). (c) **Round trip
+  measured peaks can shift near the edge; this is not an exact-timing
+  guarantee for finite-aperture waveforms). (c) **Round trip
   has no exact identity on one-sided finite apertures** (the mirrored −p
   background of the exact bi-infinite pair cannot cancel; a pure-ω test
   pinned this): the one-sided forward recovers the input *eventwise* —

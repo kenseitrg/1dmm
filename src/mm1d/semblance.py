@@ -33,10 +33,10 @@ set to 0 (unconstrained).
 cell, so on noise-free gathers every gate placement inside an event's
 wavelet extent ties near ``S ~ 1`` (a vertical ridge wider than the wavelet)
 and the panel argmax is ill-posed.  Field data always carries incoherent
-noise, which breaks the ties toward the alignment cell; scans of our
-deterministic gathers should add a small seeded noise floor to the *gather*
-(caller side, e.g. 1 % of peak) before computing the panel -- the panel
-itself stays pure and deterministic.
+noise, which can break ties toward the alignment cell. Raw noiseless data
+are the validation default; an optional, explicitly labelled caller-side
+noise experiment must not be mistaken for artifact removal. Fold/support
+are available from :func:`semblance_with_fold`.
 
 The same panel function serves all three wavefield variants, so ridge
 patterns compare directly between them.  Scan grids are auto-scaled:
@@ -67,6 +67,8 @@ Pick-bias notes (stated on the script figures):
   full aperture, pin to Dix within about one velocity cell.
 """
 
+from dataclasses import dataclass
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -74,11 +76,13 @@ from mm1d.gathers import DEFAULT_APERTURE_TAPER, critical_mute_slowness, slownes
 from mm1d.model import LayeredModel
 
 __all__ = [
+    "SemblanceResult",
     "default_t0_grid",
     "default_velocity_grid",
     "dix_rms_velocities",
     "scan_slowness_bound",
     "semblance_panel",
+    "semblance_with_fold",
 ]
 
 _CHUNK: int = 128
@@ -245,6 +249,14 @@ def _validated_scan_grid(grid: NDArray[np.float64], name: str) -> NDArray[np.flo
     return values
 
 
+@dataclass(frozen=True)
+class SemblanceResult:
+    """Coherence (0..1) and contributing trace count on the same (V,T0) grid."""
+
+    panel: NDArray[np.float64]
+    fold: NDArray[np.int64]
+
+
 def semblance_panel(
     gather: NDArray[np.float64],
     offsets_m: NDArray[np.float64],
@@ -255,7 +267,38 @@ def semblance_panel(
     *,
     min_traces_fraction: float = 0.2,
     p_mute_s_m: float | None = None,
+    valid_samples: NDArray[np.bool_] | None = None,
 ) -> NDArray[np.float64]:
+    """Return coherence only; arguments/units as :func:`semblance_with_fold`.
+
+    Existing ndarray API retained. Use semblance_with_fold for support-aware
+    interpretation; valid_samples excludes gates touching missing ray events.
+    """
+    return semblance_with_fold(
+        gather,
+        offsets_m,
+        dt_s,
+        t0_grid_s,
+        v_grid_m_s,
+        gate_s,
+        min_traces_fraction=min_traces_fraction,
+        p_mute_s_m=p_mute_s_m,
+        valid_samples=valid_samples,
+    ).panel
+
+
+def semblance_with_fold(
+    gather: NDArray[np.float64],
+    offsets_m: NDArray[np.float64],
+    dt_s: float,
+    t0_grid_s: NDArray[np.float64],
+    v_grid_m_s: NDArray[np.float64],
+    gate_s: float,
+    *,
+    min_traces_fraction: float = 0.2,
+    p_mute_s_m: float | None = None,
+    valid_samples: NDArray[np.bool_] | None = None,
+) -> SemblanceResult:
     """Neidell-Taner semblance panel of an offset gather over (T0, V_stk).
 
     Sliding-window semblance on hyperbolic moveout (see the module docstring
@@ -296,12 +339,16 @@ def semblance_panel(
         slowness at or beyond it are excluded (default None: no slowness
         bound).
 
+    valid_samples : ndarray of bool, optional
+        Shape matching gather; gates touching invalid samples (including
+        interpolation neighbours) are excluded. Use ray backend validity,
+        not a slant-stack taper restriction, for diagnostic gathers.
+
     Returns
     -------
-    ndarray
-        Semblance panel, shape ``(n_v, n_t0)``, values in ``[0, 1]`` (0 where
-        unconstrained); row ``i`` = ``v_grid_m_s[i]``, column ``j`` =
-        ``t0_grid_s[j]``.
+    SemblanceResult
+        panel and fold arrays of shape (n_v, n_t0). Panel is 0 where
+        unconstrained; fold reports actual support even below minimum fold.
     """
     traces = np.asarray(gather, dtype=np.float64)
     if traces.ndim != 2:
@@ -313,6 +360,11 @@ def semblance_panel(
         raise ValueError(f"gather must contain at least 2 time samples, got {n_t}")
     if not np.all(np.isfinite(traces)):
         raise ValueError("gather contains non-finite value(s)")
+    validity = (
+        np.ones(traces.shape, dtype=bool) if valid_samples is None else np.asarray(valid_samples)
+    )
+    if validity.shape != traces.shape or validity.dtype != np.bool_:
+        raise ValueError("valid_samples must be a bool array matching gather shape")
     offsets = _validated_scan_grid(offsets_m, "offsets_m")
     if offsets.size != n_x:
         raise ValueError(f"offsets_m has {offsets.size} entries but gather has {n_x} rows")
@@ -334,6 +386,7 @@ def semblance_panel(
     p_cut = p_mute_s_m * (1.0 - 1.0e-9) if p_mute_s_m is not None else None
 
     panel = np.zeros((v_grid.size, t0_grid.size), dtype=np.float64)
+    fold = np.zeros(panel.shape, dtype=np.int64)
     t0_squared = t0_grid**2
     for i_v, velocity in enumerate(v_grid):
         # hyperbola pick times per (T0, offset): shape (n_t0, n_x)
@@ -343,7 +396,7 @@ def semblance_panel(
             # (T0 = 0, x = 0) define p = 0 (normal incidence, always valid)
             with np.errstate(divide="ignore", invalid="ignore"):
                 p_local = np.where(
-                    t_pick > 0.0, offsets[np.newaxis, :] / (velocity**2 * t_pick), 0.0
+                    t_pick > 0.0, np.abs(offsets[np.newaxis, :]) / (velocity**2 * t_pick), 0.0
                 )
             slow = p_local >= p_cut  # (n_t0, n_x): offset cannot host this event
         else:
@@ -361,13 +414,15 @@ def semblance_panel(
             amplitudes = (
                 traces[x_index, i0_clipped] * (1.0 - frac) + traces[x_index, i0_clipped + 1] * frac
             )
-            trace_ok = in_record.all(axis=-1) & ~slow[window]  # whole gate in, event possible
+            supported = validity[x_index, i0_clipped] & validity[x_index, i0_clipped + 1]
+            trace_ok = (in_record & supported).all(axis=-1) & ~slow[window]
             amplitudes = np.where(trace_ok[:, :, np.newaxis], amplitudes, 0.0)
             n_valid = trace_ok.sum(axis=-1)
+            fold[i_v, window] = n_valid
             numerator = (amplitudes.sum(axis=1) ** 2).sum(axis=-1)
             denominator = n_valid * (amplitudes**2).sum(axis=(1, 2))
             good = (n_valid >= min_traces) & (denominator > 0.0)
             panel[i_v, window] = np.divide(
                 numerator, denominator, out=np.zeros_like(numerator), where=good
             )
-    return panel
+    return SemblanceResult(panel, fold)

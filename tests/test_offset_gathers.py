@@ -37,6 +37,7 @@ from scipy.signal import hilbert
 
 from mm1d.gathers import (
     SURFACE,
+    QuadratureConvergenceError,
     _aperture_weights,
     _refine_angles,
     angle_gather,
@@ -400,9 +401,10 @@ def test_aperture_weights_mute_exclusion(t2):
     assert p_mute is not None  # T2 has a fastest deeper layer (3000 m/s half-space)
     assert np.all(weights[p >= p_mute * (1.0 - 1.0e-9)] == 0.0)
     assert np.all(weights[p < p_mute * (1.0 - 1.0e-9)] > 0.0)
-    # the last unmuted node keeps only its half-interval ending at the cut
-    i_last = int(np.flatnonzero(weights > 0.0)[-1])
-    assert weights[i_last] == pytest.approx((p_mute - p[i_last - 1]) / 2.0, rel=1e-6)
+    # The straddled endpoint is explicitly evaluated, safely below criticality.
+    live = p[weights > 0.0]
+    assert live[-1] < p_mute
+    assert weights.sum() == pytest.approx(live[-1] - live[0])
     with pytest.raises(ValueError, match="taper_fraction"):
         _aperture_weights(t2, ANGLES_1DEG, True, taper_fraction=1.0)
 
@@ -439,7 +441,7 @@ def test_offset_gather_causality_and_taper(t2):
     untapered = offset_gather(
         t2,
         "full",
-        ANGLES_1DEG,
+        ANGLES_1DEG[ANGLES_1DEG <= 29.0],
         offsets,
         DT_S,
         n_samples,
@@ -477,6 +479,86 @@ def test_offset_gather_refinement_convergence(t2):
     live = np.arange(n_samples) * DT_S <= 0.7 * n_samples * DT_S
     diff = np.abs(default_grid[:, live] - fine_grid[:, live])
     assert float(np.max(diff)) <= 0.02 * float(np.max(np.abs(fine_grid)))
+
+
+@pytest.mark.parametrize("top", [10.0, 20.0])
+def test_aperture_short_constant_integrand(t2, top):
+    p, weights = _aperture_weights(t2, np.arange(top + 1), True, 0.0)
+    assert weights.sum() == pytest.approx(p[-1] - p[0], rel=1e-14)
+
+
+@pytest.mark.parametrize("model_name", ["t1", "t2", "t3"])
+@pytest.mark.parametrize("variant", ["full", "no_surface", "primaries"])
+def test_response_sampling_batch_invariance(canonical_models, model_name, variant):
+    model = canonical_models[model_name]
+    single = offset_gather(
+        model, variant, ANGLES_1DEG, np.array([0.0]), 0.004, 500, 20.0, n_fft=4000
+    )
+    batch = offset_gather(
+        model, variant, ANGLES_1DEG, np.array([800.0, 0.0, -800.0]), 0.004, 500, 20.0, n_fft=4000
+    )
+    scale = max(float(np.abs(single).max()), 1e-8)
+    np.testing.assert_allclose(single[0], batch[1], atol=1e-3 * scale, rtol=0.0)
+    np.testing.assert_allclose(batch[0], batch[2], atol=1e-14)
+
+
+@pytest.mark.parametrize("model_name", ["t1", "t2", "t3"])
+@pytest.mark.parametrize("mute", [False, True])
+@pytest.mark.parametrize("taper", [0.0, 0.15])
+def test_nonuniform_aperture(canonical_models, model_name, mute, taper):
+    model = canonical_models[model_name]
+    p, w = _aperture_weights(model, np.array([0.0, 2.0, 8.0, 19.0, 32.0, 40.0]), mute, taper)
+    assert np.all(w >= 0.0)
+    bound = critical_mute_slowness(model) if mute else None
+    valid = np.ones(p.size, dtype=bool) if bound is None else p < bound
+    assert np.all(w[~valid] == 0.0)
+    if taper == 0.0:
+        assert w.sum() == pytest.approx(np.ptp(p[valid]), rel=1e-14)
+
+
+def test_quadrature_cap_is_explicit(t1, monkeypatch):
+    monkeypatch.setattr("mm1d.gathers._MAX_QUADRATURE_NODES", 41)
+    with pytest.raises(QuadratureConvergenceError, match="residual/budget"):
+        offset_gather(t1, "primaries", ANGLES_1DEG, np.array([0.0]), 0.004, 250, 20.0)
+
+
+@pytest.mark.parametrize("impulse", [False, True])
+def test_output_convergence_multiple_initial_grids(t3, impulse):
+    def synth(step, offsets):
+        args = (t3, "full", np.arange(0.0, 40.0001, step), np.array(offsets), 0.004, 500)
+        if impulse:
+            return offset_impulse_gather(*args, n_fft=4000)
+        return offset_gather(*args, 20.0, n_fft=4000)
+
+    reference = synth(0.125, [0.0, 500.0, 1500.0])
+    for step in (1.0, 0.5):
+        got = synth(step, [0.0, 500.0, 1500.0])
+        scale = np.max(np.abs(reference), axis=1, keepdims=True)
+        assert np.all(np.abs(got - reference) <= 1e-3 * scale + 1e-10)
+    np.testing.assert_allclose(
+        synth(1.0, [0.0])[0], reference[0], atol=1e-3 * np.abs(reference[0]).max()
+    )
+
+
+@pytest.mark.parametrize("model_name", ["t1", "t2", "t3"])
+@pytest.mark.parametrize("variant", ["full", "no_surface", "primaries"])
+def test_impulse_batch_invariance(canonical_models, model_name, variant):
+    model = canonical_models[model_name]
+    args = (model, variant, ANGLES_1DEG)
+    single = offset_impulse_gather(*args, np.array([0.0]), 0.004, 250, n_fft=2000)
+    batch = offset_impulse_gather(*args, np.array([600.0, 0.0, -600.0]), 0.004, 250, n_fft=2000)
+    np.testing.assert_allclose(
+        single[0], batch[1], rtol=0.0, atol=1e-3 * np.abs(single[0]).max() + 1e-10
+    )
+    np.testing.assert_array_equal(batch[0], batch[2])
+
+
+def test_quadrature_zero_response_absolute_floor():
+    from mm1d.model import LayeredModel
+
+    model = LayeredModel(np.array([500.0]), np.array([2000.0, 2000.0]), np.array([2000.0, 2000.0]))
+    gather = offset_gather(model, "full", ANGLES_1DEG, np.array([0.0, 1000.0]), 0.004, 250, 20.0)
+    np.testing.assert_array_equal(gather, np.zeros_like(gather))
 
 
 def test_refine_angles_helper():

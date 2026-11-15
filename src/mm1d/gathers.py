@@ -31,34 +31,31 @@ Offset gathers and ray tracing (M4) come in two independent layers:
   :func:`slant_stack` is the matching forward transform (offset gather ->
   tau-p) for round-trip validation.
 
-Synthesis numerics (artifact control): the slowness aperture carries a Tukey
-(cos^2) taper over its last ``taper_fraction`` (default 15 %, parameter of
-the gather functions) and is refined internally to the anti-aliasing limit
-``delta_p <= 1 / (4 f_max x_max)`` for the requested offsets (cap 16x;
-``f_max`` = 3x the Ricker dominant frequency, or Nyquist for impulse
-gathers).  Literal FFT wrap-around is negligible at the standard 8x record
-extension (measured < 3e-5 of peak); the visible artifacts of naive
-synthesis are the acausal radiation of the hard aperture truncation (worst
-just below the post-critical mute, where ``|U|`` grows toward resonance)
-and far-offset quadrature aliasing -- both suppressed to ~1 % of peak by
-taper + refinement.  The residual near-offset pre-event ramp (a few % of
-peak, deepest events worst) is the events' own non-stationary aperture
-content -- the finite-aperture price of amplitude-preserving synthesis
-(removing it entirely would require the event catalog, i.e. deposition).
+Synthesis quadrature uses a fixed evaluated aperture endpoint, strictly below
+criticality (omitting the final 1 ppm slowness sliver), and a default 15% Tukey
+taper. Kernel sampling is only the initial grid: actual output waveforms must
+converge on TWO successive doublings to 2e-4 of each trace's peak + 1e-10.
+The 16385-node cap raises QuadratureConvergenceError with residual diagnostics,
+never silently returns an unresolved integral. Untapered near-critical full
+responses may hit this cap. Response evaluation is streamed in 32-row blocks.
+FFT periodicity and finite-aperture distortion remain separate limitations;
+converged quadrature does not remove finite-aperture pre-event smearing.
+For clean diagnostic Ricker deposition use :func:`mm1d.ray.ray_offset_gather`,
+an additive backend, not a replacement for this synthesis.
 
 Amplitude convention of the offset gathers (stated on every figure):
 2-D line-source plane-wave synthesis.  By stationary phase an event's peak
 amplitude at the offset ``x(p*)`` of its stationary ray ``p*`` scales with the
 plane-wave pressure amplitude ``A(p*)`` divided by ``sqrt(2 pi |dx/dp|(p*))``
 (focusing); the ``|omega|`` rho-filter reshapes the Ricker wavelet by
-``sqrt(omega)``.  There is no 3-D geometric spreading.  Event *times* are
-exact (group delay is unaffected by the real filter), and amplitudes are
-continuous through ``x = 0``.  Stationary rays within roughly a Fresnel
-zone of the aperture taper (``p*`` near ``p_max`` or the mute) lose
-amplitude gracefully (the taper attenuates them); event *times* stay exact
-throughout.
+``sqrt(omega)``. There is no 3-D geometric spreading.
+Ray/group times predict interior stationary arrivals,
+but measured waveform peaks can shift near aperture edges or under interference.
+The x=0 waveform is NOT the normal-incidence plane-wave Ricker trace: both
+wavelet and per-event focusing differ, though event families are preserved.
 """
 
+import logging
 from collections.abc import Sequence
 from itertools import pairwise
 
@@ -70,12 +67,14 @@ from mm1d.reflectivity import (
     WavefieldVariant,
     _validate_sampling,
     stack_response,
+    variant_multiples,
 )
 from mm1d.units import deg_to_rad
 from mm1d.wavelet import ricker_spectrum
 
 __all__ = [
     "DEFAULT_APERTURE_TAPER",
+    "QuadratureConvergenceError",
     "angle_gather",
     "angle_impulse_gather",
     "critical_mute_slowness",
@@ -586,15 +585,12 @@ def _aperture_weights(
     mute_postcritical: bool,
     taper_fraction: float = DEFAULT_APERTURE_TAPER,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Slowness grid (from angles), trapezoid weights clipped at the mute, edge-tapered.
+    """Trapezoid on evaluated nodes, with an explicit safe cutoff endpoint.
 
-    The synthesis integrates over the slowness aperture ``[0, p_end]`` with
-    ``p_end = min(last angle, critical mute)``: grid points beyond the cut
-    get zero weight and the last point below keeps only its half-interval
-    (a plain zeroing would let its weight absorb the truncated neighbour's
-    half-step).  A Tukey (cos^2) ramp then tapers the last ``taper_fraction``
-    of the surviving range, suppressing the acausal radiation of the hard
-    truncation (see :data:`DEFAULT_APERTURE_TAPER`).
+    Entirely subcritical requested apertures end at their requested last node.
+    A cutoff-straddling grid gains an evaluated endpoint at (1-1e-6)*p_mute;
+    the omitted 1 ppm critical sliver is not represented by endpoint weights.
+    Original muted nodes retain zero weight. No singular point is evaluated.
     """
     if not 0.0 <= taper_fraction < 1.0:
         raise ValueError(f"taper_fraction must be within [0, 1), got {taper_fraction}")
@@ -608,19 +604,25 @@ def _aperture_weights(
         raise ValueError("angles_deg must be strictly increasing (a monotone p aperture)")
     p = np.atleast_1d(np.asarray(slowness_from_angle(angles, model.vp_m_s[0]), dtype=np.float64))
     p_mute = critical_mute_slowness(model) if mute_postcritical else None
-    if p_mute is None:
-        weights = _trapezoid_weights(p)
-        p_end = float(p[-1])
+    if p_mute is not None and p[-1] >= p_mute * (1.0 - 1.0e-6):
+        # Explicitly evaluate a safe endpoint, never extend an endpoint weight
+        # into an unevaluated interval. Omit the final 1 ppm critical sliver.
+        p_cut = p_mute * (1.0 - 1.0e-6)
+        if p[0] >= p_cut:
+            return p, np.zeros_like(p)
+        p = np.unique(np.append(p, p_cut))
+        live = p <= p_cut
     else:
-        p_cut = p_mute * (1.0 - 1.0e-9)  # at exactly the critical slowness the stack resonates
-        right = np.empty_like(p)
-        right[:-1] = np.minimum(p[1:], p_cut)
-        right[-1] = p_cut
-        left = np.empty_like(p)
-        left[0] = p[0]
-        left[1:] = p[:-1]
-        weights = np.where(p < p_cut, (right - left) / 2.0, 0.0)
-        p_end = min(float(p[-1]), p_cut)
+        live = np.ones(p.size, dtype=bool)
+    weights = np.zeros_like(p)
+    weights[live] = _tapered_weights(p[live], taper_fraction)
+    return p, weights
+
+
+def _tapered_weights(p: NDArray[np.float64], taper_fraction: float) -> NDArray[np.float64]:
+    """Trapezoid on evaluated nodes only, with a fixed-endpoint Tukey taper."""
+    weights = _trapezoid_weights(p)
+    p_end = float(p[-1])
     if taper_fraction > 0.0 and p_end > 0.0:
         p_start_taper = (1.0 - taper_fraction) * p_end
         ramp = np.ones_like(p)
@@ -629,7 +631,7 @@ def _aperture_weights(
             np.cos(np.pi / 2.0 * (p[in_taper] - p_start_taper) / (taper_fraction * p_end)) ** 2
         )
         weights = weights * ramp
-    return p, weights
+    return weights
 
 
 def _refine_angles(angles: NDArray[np.float64], factor: int) -> NDArray[np.float64]:
@@ -645,12 +647,12 @@ def _refine_factor(
     offsets_m: NDArray[np.float64],
     f_max_hz: float,
 ) -> int:
-    """Aperture densification factor for alias-free synthesis quadrature.
+    """Kernel-only lower bound for initial synthesis quadrature.
 
     The synthesis kernel oscillates in ``p`` with phase ``omega p x``: the
     trapezoid resolves it while ``delta_p <= 1 / (4 f_max x_max)`` (half the
-    quadrature Nyquist, for margin).  Capped at 16x; 1 when there is nothing
-    to resolve (zero extent or zero bandwidth).
+    quadrature Nyquist, for margin). Not a response-aware convergence test;
+    the actual waveform refinement loop also runs at zero extent.
     """
     if f_max_hz <= 0.0:
         return 1
@@ -659,7 +661,7 @@ def _refine_factor(
         return 1
     delta_p = float(np.max(np.diff(p_s_m)))
     needed = 1.0 / (4.0 * f_max_hz * x_max)
-    return int(np.clip(np.ceil(delta_p / needed), 1, 16))
+    return max(1, int(np.ceil(delta_p / needed)))
 
 
 def _slant_stack_spectra(
@@ -688,6 +690,86 @@ def _slant_stack_spectra(
         spectra += weights[j] * kernel * response_p[j][np.newaxis, :]
     spectra *= omega_rad_s[np.newaxis, :] / np.pi
     return spectra
+
+
+class QuadratureConvergenceError(RuntimeError):
+    """Output refinement failed; the message reports grid size and residual."""
+
+
+_MAX_QUADRATURE_NODES = 16385
+
+
+def _converged_offset_gather(
+    model: LayeredModel,
+    variant: WavefieldVariant,
+    angles_deg: NDArray[np.float64],
+    offsets_m: NDArray[np.float64],
+    dt_s: float,
+    n_samples: int,
+    f_dom_hz: float | None,
+    n_fft: int | None,
+    mute_postcritical: bool,
+    taper_fraction: float,
+) -> NDArray[np.float64]:
+    """Require two successive output refinements within 2e-4 peak + 1e-10.
+
+    The kernel bound is only a starting grid. Refining the actual waveforms
+    resolves response phases (including multiples) even at x=0. Per-trace
+    peak scaling avoids a strong trace hiding a weak one. Memory is bounded
+    by 32 response rows plus the output spectra, not p x frequency x offset.
+    """
+    n_fft = _validate_sampling(dt_s, n_samples, n_fft)
+    variant_multiples(variant)
+    if f_dom_hz is not None:
+        ricker_spectrum(np.array([0.0]), f_dom_hz)  # validate even for fully muted apertures
+    offsets = _validated_offsets(offsets_m, require_grid=False)
+    p, _ = _aperture_weights(model, angles_deg, mute_postcritical, taper_fraction)
+    # Keep the evaluated endpoint even when its taper weight is zero.
+    cut = critical_mute_slowness(model) if mute_postcritical else None
+    if cut is not None:
+        p = p[p <= cut * (1.0 - 1.0e-6)]
+    if p.size < 2:
+        return np.zeros((offsets.size, n_samples))
+    freq = np.fft.rfftfreq(n_fft, d=dt_s)
+    omega = 2.0 * np.pi * freq
+    source = (
+        np.ones_like(freq)
+        if f_dom_hz is None
+        else np.asarray(ricker_spectrum(freq, f_dom_hz)) / dt_s
+    )
+    factor = _refine_factor(p, offsets, 0.5 / dt_s if f_dom_hz is None else 3.0 * f_dom_hz)
+    count = (p.size - 1) * factor + 1
+    previous = None
+    successes = 0
+    residual = float("inf")
+    while count <= _MAX_QUADRATURE_NODES:
+        grid = np.linspace(p[0], p[-1], count)
+        weights = _tapered_weights(grid, taper_fraction)
+        spectra = np.zeros((offsets.size, freq.size), dtype=np.complex128)
+        for start in range(0, count, 32):
+            block = slice(start, start + 32)
+            response = stack_response(model, variant, freq, grid[block])
+            spectra += _slant_stack_spectra(response, weights[block], grid[block], offsets, omega)
+        traces = np.fft.irfft(spectra * source, n=n_fft, axis=-1)[:, :n_samples]
+        if previous is not None:
+            error = np.max(np.abs(traces - previous), axis=1)
+            budget = 1.0e-10 + 2.0e-4 * np.max(np.abs(traces), axis=1)
+            residual = float(np.max(error / budget))
+            successes = successes + 1 if residual <= 1.0 else 0
+            if successes >= 2:
+                logging.getLogger(__name__).debug(
+                    "quadrature converged: nodes=%d, residual/budget=%.3g (2e-4 peak + 1e-10)",
+                    count,
+                    residual,
+                )
+                return traces
+        previous = traces
+        count = 2 * (count - 1) + 1
+    raise QuadratureConvergenceError(
+        f"slowness quadrature did not converge: next nodes={count}, "
+        f"limit={_MAX_QUADRATURE_NODES}, residual/budget={residual:.3g}; "
+        "reduce bandwidth/aperture or use the diagnostic ray backend"
+    )
 
 
 def offset_impulse_gather(
@@ -726,7 +808,7 @@ def offset_impulse_gather(
     Note the impulse-domain caveat: the ``|w|`` filter sharpens broadband
     spikes into rho-kernel shapes (oscillatory ``t^{-3/2}`` tails) up to
     Nyquist; the Ricker-band :func:`offset_gather` is the interpretable
-    representation (event times are identical).
+    representation (ray/group times agree; measured peaks need not).
 
     Amplitude convention: 2-D line-source plane-wave synthesis (see the
     module docstring) -- event peaks scale as ``A(p*) / sqrt(2 pi |dx/dp|)``
@@ -766,19 +848,18 @@ def offset_impulse_gather(
     ndarray
         Impulse gather, shape ``(n_offsets, n_samples)``.
     """
-    n_fft = _validate_sampling(dt_s, n_samples, n_fft)
-    offsets = _validated_offsets(offsets_m, require_grid=False)
-    p, weights = _aperture_weights(model, angles_deg, mute_postcritical, taper_fraction)
-    # refine the aperture for alias-free quadrature up to Nyquist (impulse domain)
-    factor = _refine_factor(p, offsets, f_max_hz=0.5 / dt_s)
-    if factor > 1:
-        angles_fine = _refine_angles(_validated_angles(angles_deg), factor)
-        p, weights = _aperture_weights(model, angles_fine, mute_postcritical, taper_fraction)
-    freq = np.fft.rfftfreq(n_fft, d=dt_s)
-    omega = 2.0 * np.pi * freq
-    response = stack_response(model, variant, freq, p)
-    spectra = _slant_stack_spectra(response, weights, p, offsets, omega)
-    return np.fft.irfft(spectra, n=n_fft, axis=-1)[:, :n_samples]
+    return _converged_offset_gather(
+        model,
+        variant,
+        angles_deg,
+        offsets_m,
+        dt_s,
+        n_samples,
+        None,
+        n_fft,
+        mute_postcritical,
+        taper_fraction,
+    )
 
 
 def offset_gather(
@@ -800,7 +881,8 @@ def offset_gather(
     (dominant frequency ``f_dom_hz``) folded into the synthesis integral;
     the ``|w|`` rho-filter reshapes the wavelet by ``sqrt(w)`` and event peak
     amplitudes equal ``A(p*) / sqrt(2 pi |dx/dp|)`` (2-D line-source
-    plane-wave synthesis; times exact, no 3-D spreading).
+    plane-wave synthesis; no 3-D spreading). Measured peaks may shift at
+    aperture edges or under interference; x=0 is not the M2 Ricker trace.
 
     Parameters
     ----------
@@ -835,20 +917,18 @@ def offset_gather(
     ndarray
         Synthetic gather, shape ``(n_offsets, n_samples)``.
     """
-    n_fft = _validate_sampling(dt_s, n_samples, n_fft)
-    offsets = _validated_offsets(offsets_m, require_grid=False)
-    p, weights = _aperture_weights(model, angles_deg, mute_postcritical, taper_fraction)
-    # refine the aperture for alias-free quadrature over the Ricker band
-    factor = _refine_factor(p, offsets, f_max_hz=3.0 * f_dom_hz)
-    if factor > 1:
-        angles_fine = _refine_angles(_validated_angles(angles_deg), factor)
-        p, weights = _aperture_weights(model, angles_fine, mute_postcritical, taper_fraction)
-    freq = np.fft.rfftfreq(n_fft, d=dt_s)
-    omega = 2.0 * np.pi * freq
-    response = stack_response(model, variant, freq, p)
-    spectra = _slant_stack_spectra(response, weights, p, offsets, omega)
-    spectra = spectra * np.asarray(ricker_spectrum(freq, f_dom_hz))[np.newaxis, :] / dt_s
-    return np.fft.irfft(spectra, n=n_fft, axis=-1)[:, :n_samples]
+    return _converged_offset_gather(
+        model,
+        variant,
+        angles_deg,
+        offsets_m,
+        dt_s,
+        n_samples,
+        f_dom_hz,
+        n_fft,
+        mute_postcritical,
+        taper_fraction,
+    )
 
 
 def slant_stack(
