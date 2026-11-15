@@ -127,6 +127,11 @@ def model_moveout_curves(model) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     if model.name == "thick_5layer":
         curves["M_s1"] = path_offset_time(model, [SURFACE, 0, SURFACE, 0, SURFACE], ANGLES_DEG)
         curves["interbed23"] = path_offset_time(model, [SURFACE, 2, 1, 2, SURFACE], ANGLES_DEG)
+        # peg-legs at exactly P4's 1.8 s (both bounce orderings share this
+        # curve): 4 legs in the slow 1800 m/s layer -> steeper moveout than P4,
+        # destructively interfering with it near offset, separating beyond
+        # ~20 deg incidence (the P4-attenuation signature in the full variant)
+        curves["peg13"] = path_offset_time(model, [SURFACE, 0, SURFACE, 2, SURFACE], ANGLES_DEG)
     return curves
 
 
