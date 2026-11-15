@@ -2,7 +2,8 @@
 
 Synthetic wavefields from layered P-velocity/density logs: `full`, `no_surface`,
 and `primaries`. SI units internally; public angles in degrees. See `PLAN.md`
-for validated milestones and remaining interpretation work.
+for validated milestones; [M6b interpretation](docs/M6b_INTERPRETATION.md) explains
+finite-spread fits, ridge attribution and their limits.
 
 ## Run
 
@@ -15,12 +16,15 @@ uv run python scripts/zero_offset.py --no-show
 uv run python scripts/angle_gathers.py --no-show
 uv run python scripts/offset_gathers.py --backend ray --no-show
 uv run python scripts/semblance.py --backend ray --no-show
+uv run python scripts/interpretation.py --no-show
 uv run python scripts/check_artifacts.py --no-show
 ```
 
 Figures and numerical reports go to gitignored `output/`. Omit `--no-show` for
 interactive viewing. Semblance also writes fold maps, NPZ panels/fold arrays,
-and compact event tables. Noise is **off** by default; `--noise-fraction .01`
+and compact event tables. Interpretation writes `output/interpretation.md`/JSON,
+cellwise energy-accounting NPZ files, and RMS versus finite-spread figures for
+T2/T3. Noise is **off** by default; `--noise-fraction .01`
 is an optional, explicitly labelled seeded experiment, not an artifact fix.
 
 ## Offset backends (not interchangeable amplitudes)
@@ -45,12 +49,17 @@ from mm1d.ray import ray_offset_gather
 from mm1d.semblance import semblance_with_fold
 
 model = load_blocked_model("data/water_bottom.csv")
-offsets = np.linspace(0., 900., 61)
-result = ray_offset_gather(model, "full", offsets, .002, 1500, 20.)
+offsets = np.linspace(0.0, 900.0, 61)
+result = ray_offset_gather(model, "full", offsets, 0.002, 1500, 20.0)
 scan = semblance_with_fold(
-    result.traces, offsets, .002, np.linspace(.1, 2.8, 271),
-    np.linspace(1200., 2600., 81), .05,
-    p_mute_s_m=result.p_max_s_m, valid_samples=result.valid_samples,
+    result.traces,
+    offsets,
+    0.002,
+    np.linspace(0.1, 2.8, 271),
+    np.linspace(1200.0, 2600.0, 81),
+    0.05,
+    p_mute_s_m=result.p_max_s_m,
+    valid_samples=result.valid_samples,
 )
 print(result.catalog.reached_bounds, scan.fold.shape)
 ```
@@ -72,8 +81,13 @@ Fine logs can require tighter bounds; finite catalogs are not infinite responses
 
 Noiseless semblance has scale-free coherence ties. RMS markers are small-spread
 anchors, not necessarily the unrestricted panel argmax or finite-offset best-fit
-velocity; inspect fold alongside coherence. Complete ridge attribution and
-finite-spread event trajectories remain roadmap work.
+velocity; inspect fold alongside coherence. `mm1d.interpretation` fits exact
+supported arrivals over cumulative spreads and profiles joint T0/V timing-budget
+envelopes (not statistical confidence intervals). `mm1d.ridges` accounts for all
+energetic cells using coherent coincident-path groups and exposes interference,
+wavelet-flank shifts and support changes. The reproducible report validates six
+primary and four water-multiple anchors without requiring unique raw maxima.
+See [the report guide and measured findings](docs/M6b_INTERPRETATION.md).
 
 ## Checks
 

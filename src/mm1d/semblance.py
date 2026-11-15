@@ -48,23 +48,23 @@ gather; the Dix values it is compared against come from
 
 Pick-bias notes (stated on the script figures):
 
-- Dix velocities are *small-spread* stacking velocities.  At large
-  offset/depth ratios the true Snell-parameter moveout is non-hyperbolic and
-  drags the semblance maximum above Dix (e.g. +25-35 m/s at the full M4
-  aperture for T2/T3 primaries); scans therefore use a moderate aperture --
-  offsets up to ``~1.1 km/s`` times the deepest primary T0 -- where the
-  hyperbola fits the parametric moveout to within a few ms and picks stay
-  within about one velocity cell of Dix for T1-T3.
+- Dix velocities are *small-spread* stacking velocities. At large
+  offset/depth ratios the true Snell moveout is non-hyperbolic. The moderate
+  demo spread (``~1.1 km/s`` times deepest primary T0) limits geometric fit
+  residuals, but does NOT promise one-cell unrestricted noiseless picks.
+  :mod:`mm1d.interpretation` fits finite-spread arrivals separately and
+  profiles explicit joint T0/V timing-budget envelopes.
 - The scan respects the synthesis aperture via ``p_mute_s_m`` (pass
   :func:`scan_slowness_bound`: the slowness where the synthesis taper
   starts): trial hyperbolas are scored only on offsets whose local slowness
   is inside the *clean* aperture, where M4 documented event fidelity
   (beyond the taper, event tails are attenuated and phase-shifted ~10 ms).
-- Resolution floor: at the taper-clean aperture the *shallowest* interface
-  of each model has ``x_max / T0 ~ 0.7`` -- its stacking velocity is only
-  resolved to ~+/-100 m/s at 20 Hz (a uniform gate shift inside the broad
-  wavelet is a near-symmetry of S).  Deep interfaces, whose events span the
-  full aperture, pin to Dix within about one velocity cell.
+- Legacy seeded-noise checkpoints measured a roughly +/-100 m/s shallow
+  resolution floor and near-one-cell deep picks. These are not universal
+  budgets for raw ray panels: wavelet-flank ties, interference and changing
+  scan-cell support can displace high coherence far from event centers.
+  :mod:`mm1d.ridges` uses gate energy AND fold, and accounts for those shifts
+  without declaring every coherence streak a distinct event.
 """
 
 from dataclasses import dataclass
@@ -251,10 +251,50 @@ def _validated_scan_grid(grid: NDArray[np.float64], name: str) -> NDArray[np.flo
 
 @dataclass(frozen=True)
 class SemblanceResult:
-    """Coherence (0..1) and contributing trace count on the same (V,T0) grid."""
+    """Coherence, fold and gate RMS pressure on the same (V,T0) grid.
+
+    gate_rms is sqrt(mean(d**2)) over contributing traces and gate samples,
+    including cells below minimum fold (zero when no trace contributes).
+    Unlike coherence it distinguishes energetic ridges from noiseless tails.
+    """
 
     panel: NDArray[np.float64]
     fold: NDArray[np.int64]
+    gate_rms: NDArray[np.float64]
+
+
+def _hyperbola_gate_samples(
+    traces: NDArray[np.float64],
+    offsets: NDArray[np.float64],
+    dt_s: float,
+    t0: NDArray[np.float64],
+    velocity: NDArray[np.float64] | float,
+    gate_times: NDArray[np.float64],
+    p_cut: float | None,
+    validity: NDArray[np.bool_],
+) -> tuple[NDArray[np.float64], NDArray[np.bool_]]:
+    """Sample already-validated trial cells; shared with attribution diagnostics."""
+    v = np.broadcast_to(np.asarray(velocity), t0.shape)
+    pick = np.sqrt(t0[:, None] ** 2 + (offsets[None, :] / v[:, None]) ** 2)
+    times = pick[:, :, None] + gate_times
+    position = times / dt_s
+    i0 = np.floor(position).astype(np.intp)
+    frac = position - i0
+    in_record = (times >= 0) & (i0 >= 0) & (i0 + 1 < traces.shape[1])
+    clipped = np.clip(i0, 0, traces.shape[1] - 2)
+    rows = np.arange(offsets.size)[None, :, None]
+    supported = validity[rows, clipped] & validity[rows, clipped + 1]
+    ok = (in_record & supported).all(axis=-1)
+    if p_cut is not None:
+        local_p = np.divide(
+            np.abs(offsets)[None, :],
+            v[:, None] ** 2 * pick,
+            out=np.zeros_like(pick),
+            where=pick > 0,
+        )
+        ok &= local_p < p_cut
+    amplitudes = traces[rows, clipped] * (1 - frac) + traces[rows, clipped + 1] * frac
+    return np.where(ok[:, :, None], amplitudes, 0.0), ok
 
 
 def semblance_panel(
@@ -347,8 +387,9 @@ def semblance_with_fold(
     Returns
     -------
     SemblanceResult
-        panel and fold arrays of shape (n_v, n_t0). Panel is 0 where
-        unconstrained; fold reports actual support even below minimum fold.
+        panel, fold and gate_rms arrays of shape (n_v, n_t0). Panel is 0
+        where unconstrained; fold and gate RMS report contributing samples
+        even below minimum fold. Gate RMS is in the input pressure units.
     """
     traces = np.asarray(gather, dtype=np.float64)
     if traces.ndim != 2:
@@ -381,48 +422,35 @@ def semblance_with_fold(
 
     n_gate = max(1, round(gate_s / dt_s))
     gate_times = (np.arange(n_gate, dtype=np.float64) - (n_gate - 1) / 2.0) * dt_s
-    x_index = np.arange(n_x)[np.newaxis, :, np.newaxis]
     min_traces = max(2, int(np.ceil(min_traces_fraction * n_x)))
     p_cut = p_mute_s_m * (1.0 - 1.0e-9) if p_mute_s_m is not None else None
 
     panel = np.zeros((v_grid.size, t0_grid.size), dtype=np.float64)
     fold = np.zeros(panel.shape, dtype=np.int64)
-    t0_squared = t0_grid**2
+    gate_rms = np.zeros_like(panel)
     for i_v, velocity in enumerate(v_grid):
-        # hyperbola pick times per (T0, offset): shape (n_t0, n_x)
-        t_pick = np.sqrt(t0_squared[:, np.newaxis] + (offsets[np.newaxis, :] / velocity) ** 2)
-        if p_cut is not None:
-            # hyperbola-local slowness p = dt/dx = x / (V^2 t); at t = 0
-            # (T0 = 0, x = 0) define p = 0 (normal incidence, always valid)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                p_local = np.where(
-                    t_pick > 0.0, np.abs(offsets[np.newaxis, :]) / (velocity**2 * t_pick), 0.0
-                )
-            slow = p_local >= p_cut  # (n_t0, n_x): offset cannot host this event
-        else:
-            slow = np.zeros(t_pick.shape, dtype=bool)
         for start in range(0, t0_grid.size, _CHUNK):
             window = slice(start, min(start + _CHUNK, t0_grid.size))
-            times = t_pick[window][:, :, np.newaxis] + gate_times  # (m, n_x, n_gate)
-            position = times / dt_s
-            i0 = np.floor(position).astype(np.intp)
-            frac = position - i0
-            in_record = (
-                (times >= 0.0) & (i0 >= 0) & (i0 + 1 <= n_t - 1)
-            )  # linear interpolation needs both neighbours
-            i0_clipped = np.clip(i0, 0, n_t - 2)
-            amplitudes = (
-                traces[x_index, i0_clipped] * (1.0 - frac) + traces[x_index, i0_clipped + 1] * frac
+            amplitudes, trace_ok = _hyperbola_gate_samples(
+                traces,
+                offsets,
+                dt_s,
+                t0_grid[window],
+                float(velocity),
+                gate_times,
+                p_cut,
+                validity,
             )
-            supported = validity[x_index, i0_clipped] & validity[x_index, i0_clipped + 1]
-            trace_ok = (in_record & supported).all(axis=-1) & ~slow[window]
-            amplitudes = np.where(trace_ok[:, :, np.newaxis], amplitudes, 0.0)
             n_valid = trace_ok.sum(axis=-1)
             fold[i_v, window] = n_valid
             numerator = (amplitudes.sum(axis=1) ** 2).sum(axis=-1)
-            denominator = n_valid * (amplitudes**2).sum(axis=(1, 2))
+            energy = (amplitudes**2).sum(axis=(1, 2))
+            denominator = n_valid * energy
+            gate_rms[i_v, window] = np.sqrt(
+                np.divide(energy, n_valid * n_gate, out=np.zeros_like(energy), where=n_valid > 0)
+            )
             good = (n_valid >= min_traces) & (denominator > 0.0)
             panel[i_v, window] = np.divide(
                 numerator, denominator, out=np.zeros_like(numerator), where=good
             )
-    return SemblanceResult(panel, fold)
+    return SemblanceResult(panel, fold, gate_rms)

@@ -289,6 +289,7 @@ def generate_figures(backend="slant", noise_fraction=0.0) -> list[Path]:
                 OUTPUT_DIR / f"semblance_{model.name}_{variant}{suffix}.npz",
                 panel=scan.panel,
                 fold=scan.fold,
+                gate_rms=scan.gate_rms,
                 t0_s=t0_grid,
                 velocity_m_s=v_grid,
             )

@@ -276,23 +276,48 @@ pressure R/T path products, unit-peak Ricker, no spreading; existing
   ~2.43 MB Python-traced peak allocation (not process RSS); timings vary. Slant
   single/batch/fine reproducer total ~7.58 s; T1 full three-offset ~0.65 s.
 
-### M6b — Interpretation & finite-spread trajectories (remaining)
+### M6b — Interpretation & finite-spread trajectories ✅ (complete 2026-11-15)
 
 **Goal:** complete multiple identification, not just a finite synthesis catalog.
-- [ ] Add finite-offset best-fit stacking trajectories separately from the
+- [x] Add finite-offset best-fit stacking trajectories separately from the
   already plotted (T₀, small-spread RMS) anchors; print uncertainties/fold.
-- [ ] Attribute every strong T2/T3 semblance ridge and document noiseless ties,
-  interference and scan-cell support changes. Current family markers/tables are
-  aids, not a claim that every visible coherence streak is a distinct event.
-- [ ] Validate primary/surface ridge matches with explicit support/resolution
+  Equal-trace, free-intercept arrival-time least squares over cumulative
+  supported/valid spreads; joint T₀/V max-time-error envelopes, not statistical CIs.
+- [x] Attribute every strong T2/T3 semblance ridge and document noiseless ties,
+  interference and scan-cell support changes. Strong means S≥0.8, gate RMS≥1%
+  of each variant's maximum, fold≥13/61; every selected cell/connected region is
+  accounted for, not declared a distinct event. All ordered paths participate
+  in coherent geometry groups; isolated energies plus signed interference
+  reconstruct the bounded response. Cellwise gate shifts expose flank ties.
+- [x] Validate primary/surface ridge matches with explicit support/resolution
   budgets; do not require unique raw argmax on wavelet tails or low-fold cells.
-- [ ] A fast-layer-over-slow T4 remains optional for higher-than-primary
-  interbed stacking velocities; not demonstrated by T1–T3.
+  Six primary-only and four T2 water-train anchors pass. Budget = 1/8 wavelet
+  period + half sample + half T₀ cell + projected half V cell; freeze membership
+  for geometric resolution, print actual scan fold separately. Forward leg sums
+  vs inverse Snell errors ≤4.5e-10 m / 2.7e-15 s on reported geometries.
+- [x] Optional T4 explicitly deferred: the fast-layer-over-slow higher-than-primary
+  interbed regime is not demonstrated by T1–T3.
 
 **Done when:** the interpretation report explains the supported strong ridges
 with independent moveout checks and separates resolution/nonhyperbolicity from
 multiple-family identification. Dedicated `event_catalog.py` is deferred:
 current display tables/anchors are integrated into `scripts/semblance.py`.
+
+**Implementation / interpretation:** user-confirmed diagnostic **ray reference**;
+slant default unchanged, no claim of slant ridge attribution. New reusable
+`interpretation.py` / `ridges.py`; `scripts/interpretation.py --no-show` writes
+complete region/group tables, JSON/NPZ cell accounting and RMS/finite-spread
+figures. Versioned report guide: `docs/M6b_INTERPRETATION.md`.
+
+T2 full/no_surface/primaries: **2313/570/448** energetic cells in **15/3/2**
+regions; T3: **707/557/330** in **20/10/4**. T3 full has **342 mixed cells**;
+its deepest primary's nearest fit cell S≈0.749 and no strong center-envelope
+match due to interference, while primary-only anchors pass. T2 deep-primary
+RMS 2049.4 → finite-spread 2059.8 m/s (61 usable traces), versus 2054.4 with
+42 usable full-panel traces. T3 primary-only finite-fit residuals ≤1.474 ms,
+while energetic mean gate shifts reach ~64 ms: nonhyperbolicity alone does
+not explain apparent ridge shifts. Resolution intervals are deliberately
+budgeted and sometimes scan-censored; no unique noiseless pick is asserted.
 
 ### M7 — Polish & real-log workflow
 **Goal**: first usable tool.
@@ -327,6 +352,19 @@ figure set; all quality gates green.
   M6 report phrasing reflects it.
 
 ## Changelog
+
+- 2026-11-15: **M6b complete** — user chose ray-reference interpretation;
+  optional T4 and quantitative slant attribution deferred. Added finite-spread
+  free-intercept fits, exact joint timing-budget envelopes, scanner gate RMS,
+  coherent path-group cell accounting with signed cross energy, common gate
+  shifts/differential errors and actual fold. Reproducible T2/T3 report accounts
+  for every declared energetic region and passes 10 independent-moveout-budget
+  ridge anchors; does not claim all high-S streaks are distinct events or that
+  full-panel interference always leaves a primary-center peak. Figures inspected
+  directly (open RMS circles vs cyan fits, separate spread axes, variant families
+  and displaced/interfering T3 responses); overlapping overlay labels corrected.
+  See `docs/M6b_INTERPRETATION.md`. Quality gates: ruff, ty, **319 pytest tests**
+  passed; runtime remains existing uv Python 3.14.
 
 - 2026-11-15: **HANDOVER implementation** — completed P0 aperture quadrature and
   response-aware convergence; brought M6a bounded paths forward and added the
