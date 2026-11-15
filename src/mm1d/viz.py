@@ -15,6 +15,12 @@ M4 scope: offset gathers -- variable-density panels (offset vs two-way time)
 with parametric theoretical-moveout overlays ``(x(p), T(p))`` from Snell ray
 tracing.  Panels state the 2-D line-source plane-wave synthesis convention
 (sqrt-omega wavelet, ``1/sqrt(2 pi |dx/dp|)`` focusing, no 3-D spreading).
+
+M5 scope: semblance panels -- variable-density images with the zero-offset
+time vertical (increasing downward, the seismic-section convention, so panels
+compare side by side in columns) and the stacking velocity horizontal;
+optional reference overlays (Dix RMS curve of the primaries,
+pinned-multiple velocity lines) and a ``[0, 1]`` colorbar.
 """
 
 from collections.abc import Mapping
@@ -23,17 +29,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.image import AxesImage
 from numpy.typing import NDArray
 
 from mm1d.reflectivity import ALL_VARIANTS, WavefieldVariant
 
 __all__ = [
     "VARIANT_LABELS",
+    "SemblanceOverlay",
     "angle_gather_stack_figure",
     "offset_gather_stack_figure",
     "plot_angle_gather",
     "plot_offset_gather",
+    "plot_semblance",
     "plot_trace_panel",
+    "semblance_stack_figure",
     "zero_offset_stack_figure",
 ]
 
@@ -46,6 +56,12 @@ VARIANT_LABELS: Mapping[WavefieldVariant, str] = {
 
 SPIKE_RELATIVE_THRESHOLD = 1.0e-3
 """Impulse-response stems are drawn for samples above this fraction of max|sample|."""
+
+SemblanceOverlay = Mapping[
+    str,
+    tuple[NDArray[np.float64], ...] | tuple[NDArray[np.float64], NDArray[np.float64], str],
+]
+"""Overlay curves of a semblance panel: label -> ``(t0, v)`` or ``(t0, v, fmt)``."""
 
 
 def plot_trace_panel(
@@ -348,6 +364,161 @@ def offset_gather_stack_figure(
     axes[-1].set_xlabel("offset m")
     fig.suptitle(suptitle)
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
+    return fig
+
+
+def plot_semblance(
+    ax: Axes,
+    v_grid_m_s: NDArray[np.float64],
+    t0_grid_s: NDArray[np.float64],
+    panel: NDArray[np.float64],
+    *,
+    title: str = "",
+    overlay: SemblanceOverlay | None = None,
+    colorbar: bool = True,
+) -> AxesImage:
+    """Plot one semblance panel: time vertical, stacking velocity horizontal.
+
+    Zero-offset time increases downward (the seismic-section convention, as
+    the gather panels of M3/M4), so several panels can be arranged in
+    columns side by side (:func:`semblance_stack_figure`).
+
+    Parameters
+    ----------
+    ax : Axes
+        Target axes.
+    v_grid_m_s : ndarray
+        Stacking-velocity scan grid, m/s (assumed uniform for pixel edges;
+        horizontal axis, increasing to the right).
+    t0_grid_s : ndarray
+        Zero-offset scan grid, s (assumed uniform for pixel edges; vertical
+        axis, 0 at the top, increasing downward).
+    panel : ndarray
+        Semblance values, shape ``(n_v, n_t0)`` (from
+        :func:`mm1d.semblance.semblance_panel`), range ``[0, 1]``.
+    title : str, optional
+        Panel title.
+    overlay : mapping, optional
+        Label -> ``(t0_s, v_m_s)`` reference curve (e.g. the Dix RMS curve of
+        the primaries, or a pinned-multiple velocity line as a 2-point
+        segment); drawn as white dashed curves. An optional third element
+        sets the matplotlib format string (e.g. ``(t0, v, "w:")`` dotted for
+        velocity pins, to distinguish them from curves).
+    colorbar : bool, optional
+        Add a labeled colorbar for the ``[0, 1]`` semblance scale to the right
+        of the axes (default True; disable inside shared-axis stack figures).
+
+    Returns
+    -------
+    AxesImage
+        The image object (for figure-level colorbars in stack figures).
+    """
+    t0_grid = np.asarray(t0_grid_s, dtype=np.float64)
+    v_grid = np.asarray(v_grid_m_s, dtype=np.float64)
+    d_t0 = t0_grid[1] - t0_grid[0] if t0_grid.size > 1 else 1.0
+    d_v = v_grid[1] - v_grid[0] if v_grid.size > 1 else 1.0
+    extent = (
+        v_grid[0] - d_v / 2.0,
+        v_grid[-1] + d_v / 2.0,
+        t0_grid[-1] + d_t0,  # bottom edge (imshow with origin='upper')
+        0.0,  # top edge
+    )
+    image = ax.imshow(
+        panel.T,
+        extent=extent,
+        origin="upper",
+        aspect="auto",
+        cmap="magma",
+        vmin=0.0,
+        vmax=1.0,
+        interpolation="nearest",
+    )
+    if overlay:
+        v_span = extent[1] - extent[0]
+        t_span = extent[2] - extent[3]
+        for label, curve in overlay.items():
+            points = list(curve)
+            t0_curve = np.asarray(points[0], dtype=np.float64)
+            v_curve = np.asarray(points[1], dtype=np.float64)
+            fmt = str(points[2]) if len(points) > 2 and isinstance(points[2], str) else "w--"
+            ax.plot(v_curve, t0_curve, fmt, lw=1.0)
+            valid = np.flatnonzero(np.isfinite(t0_curve) & np.isfinite(v_curve))
+            if valid.size:
+                ax.text(
+                    v_curve[valid[0]] + 0.02 * v_span,
+                    t0_curve[valid[0]] + 0.012 * t_span,
+                    label,
+                    color="w",
+                    fontsize=8,
+                    ha="left",
+                    va="top",
+                )
+    ax.set_xlim(extent[0], extent[1])
+    ax.set_ylim(extent[2], extent[3])
+    ax.set_xlabel("stacking velocity m/s")
+    ax.set_ylabel("zero-offset time s")
+    if colorbar:
+        ax.figure.colorbar(image, ax=ax, label="semblance")
+    if title:
+        ax.set_title(title, fontsize=9)
+    return image
+
+
+def semblance_stack_figure(
+    v_grid_m_s: NDArray[np.float64],
+    t0_grid_s: NDArray[np.float64],
+    panels: Mapping[WavefieldVariant, NDArray[np.float64]],
+    *,
+    suptitle: str,
+    overlay: SemblanceOverlay | None = None,
+) -> Figure:
+    """Column comparison figure of semblance panels (canonical variant order).
+
+    Zero-offset time is the shared vertical axis (seismic convention), so the
+    variants compare side by side; panels can also be stacked with gather
+    figures of the same orientation.
+
+    Parameters
+    ----------
+    v_grid_m_s : ndarray
+        Stacking-velocity scan grid, m/s (shared horizontal axis).
+    t0_grid_s : ndarray
+        Zero-offset scan grid, s (shared vertical axis).
+    panels : mapping
+        Variant name -> semblance panel ``(n_v, n_t0)``; missing variants of
+        :data:`~mm1d.reflectivity.ALL_VARIANTS` are skipped.
+    suptitle : str
+        Figure title.
+    overlay : mapping, optional
+        Label -> ``(t0, v[, fmt])`` reference curves; see :func:`plot_semblance`.
+
+    Returns
+    -------
+    Figure
+        Unsaved figure with one column per variant (``full`` leftmost), a
+        shared time/velocity frame and one figure-level colorbar on the
+        right (constrained layout reserves its space).
+    """
+    present = [v for v in ALL_VARIANTS if v in panels]
+    # constrained layout: the figure-level colorbar's space is reserved
+    # correctly (tight_layout re-arranges the parent panels and can drop the
+    # colorbar on top of the last panel)
+    fig = plt.figure(figsize=(1.9 + 3.1 * len(present), 6.0), layout="constrained")
+    axes = fig.subplots(1, len(present), sharex=True, sharey=True, squeeze=False)[0, :]
+    image = None
+    for ax, variant in zip(axes, present, strict=True):
+        image = plot_semblance(
+            ax,
+            v_grid_m_s,
+            t0_grid_s,
+            panels[variant],
+            title=VARIANT_LABELS[variant],
+            overlay=overlay,
+            colorbar=False,
+        )
+    assert image is not None  # present is non-empty by ALL_VARIANTS construction
+    fig.colorbar(image, ax=axes.tolist(), location="right", pad=0.02, label="semblance")
+    fig.suptitle(suptitle)
     return fig
 
 

@@ -166,8 +166,8 @@ hand-computed values for T1–T3 interfaces; `R²+T²=1` for all θ in grid.
   deeper section — not producible by T1–T3 (expectation corrected 2026-11-09,
   see changelog).
 
-### M5 — Semblance (`semblance.py`)
-**Goal**: Neidell–Taner semblance panels per variant.
+### M5 — Semblance (`semblance.py`) ✅ (complete 2026-11-10)
+**Goal**: Neidell-Taner semblance panels per variant.
 - Sliding-window semblance over (T₀, V_stk) on hyperbolic moveout; shared for
   all three variants; parameter ranges auto-scaled from gather extent.
 - Script `scripts/semblance.py` → `output/semblance_{model}_{variant}.png`.
@@ -229,6 +229,68 @@ figure set; all quality gates green.
 
 ## Changelog
 
+- 2026-11-10: **M5 figure rework (user request)** — semblance panels rotated to
+  the seismic-section convention: zero-offset time is now the *vertical* axis
+  (0 at top, increasing downward, as the M3/M4 gather panels), stacking
+  velocity horizontal — so variant panels compare side by side in *columns*
+  (`semblance_stack_figure`: one column per variant, ``full`` leftmost;
+  single-panel figures rotated to match).  API: `plot_semblance` /
+  `semblance_stack_figure` now take ``(v_grid, t0_grid, panel(s))`` in
+  (x, y, data) order like the other gather plotters.  Colorbar placement
+  fixed: stack figures use constrained layout so the figure-level colorbar's
+  space is reserved (tight_layout + multi-parent `fig.colorbar` dropped it on
+  top of the last panel); single figures likewise; long titles wrapped to two
+  lines with a compact scan note (suptitle shortened — the full note lives in
+  panel titles).  glm-5.3-flash verified on water_bottom (single + stack) and
+  thick_5layer stack: columns ordered full/no_surface/primaries, time down,
+  velocity right, colorbar outside all panels, no clipped titles/labels, Dix
+  curve threading the four T3 primary blobs.
+- 2026-11-10: **M5 complete** — `semblance.py`: `semblance_panel` (the Neidell-Taner
+  coherency `S = Σ_j (Σ_i d_ij)² / (N Σ_ij d_ij²)` on a centered gate over hyperbolic
+  moveout, linear-interpolation sampling, per-cell exclusion of traces whose gate
+  leaves the record or whose hyperbola-local slowness `p = x/(V²t)` reaches the scan
+  bound), `default_t0_grid` / `default_velocity_grid` (auto-scaled:
+  `[0.8·min(vp), 1.25·max Dix]`), `dix_rms_velocities` (M6's path-leg formula for
+  primaries), `scan_slowness_bound` (= `(1 − taper)·min(mute, p(θ_max))`).
+  `viz.plot_semblance` / `semblance_stack_figure` (magma panels, Dix-curve +
+  velocity-pin overlays with per-curve styles); `scripts/semblance.py` →
+  `output/semblance_{model}_{variant}.png` + `_stack.png`; 17 new tests (199 total).
+  Design decisions & findings:
+  (a) **Scan aperture**: `x ≤ 1.1 km/s × T0(deepest primary)` — Dix comparability needs
+  small spreads (at the full M4 aperture the non-hyperbolic moveout drags picks
+  +25-35 m/s above Dix); at this aperture deep-interface picks track Dix within
+  about one velocity cell.
+  (b) **Taper-clean slowness bound**: beyond the synthesis taper the M4-documented
+  event tails are attenuated (up to 25x) and phase-shifted (~10 ms early) — summing
+  them poisons cells; the bound excludes them per cell, event-agnostically, via the
+  hyperbola's local slowness (for a pure-layer event that *is* its stationary ray,
+  so e.g. T2's P1 scans only x ≲ 280 m).
+  (c) **Scale-free coherence ties**: S is amplitude-normalized per cell, so on
+  noise-free deterministic gathers every gate placement inside an event's wavelet
+  extent ties near S ≈ 1 and argmax is ill-posed — a seeded 1 % incoherent noise
+  floor (caller side, field-data reality) makes maxima well-posed at alignment.
+  (d) **Shallow-interface resolution floor (deviation from the one-cell anchor)**:
+  the *shallowest* interface of each model is mute-limited to x/T0 ≈ 0.7 at the
+  taper-clean bound; with a 20 Hz wavelet its V_stk is resolved only to ~±100 m/s
+  (a uniform gate shift inside the broad wavelet is a near-symmetry of S).  Measured
+  picks: T2 P1 −79 m/s (t0 +19 ms), T1 P1 −85, T3 P1 −63 — the bias is deterministic
+  (unchanged under 0-5 % noise and under gather roughening/balancing; tested and
+  rejected: d/dt, d²/dt², boxcar-detrend, gate-local AGC, trace-peak balancing —
+  none move the shallow picks).  All *deeper* interfaces pin to Dix within ≈1 cell
+  (T2 P2 +18.7 m/s ≈ 1.1 cells at 17 m/s spacing; T3 P2/P3/P4 ≤ 0.6 cells).  Tests
+  assert the one-cell anchor for deep interfaces and the ±100 m/s floor for the
+  shallowest.
+  (e) **Acceptance physics verified**: T2 `full` water-bottom train (orders 1-4)
+  pinned within ±28 m/s of v_w at every order, below the same-T0 Dix trend;
+  peg12 picked within 0.5 m/s of its path-leg V_stk (1897.4) between pin and trend;
+  T1 primary + first-order multiple both at v₁; T3 four primaries with the Dix curve
+  threading the blobs.  Figures verified via glm-5.3-flash (pinned ridge visible
+  and tracked by the dotted pin line, Dix curve through primary blobs, primaries
+  panel free of multiple energy, `no_surface` lacks the pinned ridge); one figure
+  nit fixed after review (distinct line styles + label placement for pin vs Dix
+  curve).  Bug found & fixed during the scan-aperture work: an initial units slip
+  (x_max = 1.1·T0 in m/s not applied) produced 0.99 m offsets and saturated S ≈ 1
+  panels — caught by the hand-built-hyperbola anchors.
 - 2026-11-09: **M4.1 — offset-gather artifact control** (user request:
   "do not like wrap-around artifacts").  Diagnosis first: literal FFT
   wrap-around was never the visible issue (8x record extension measured
